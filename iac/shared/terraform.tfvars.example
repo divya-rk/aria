@@ -1,6 +1,0 @@
-# Shared Stack Configuration
-# Copy to terraform.tfvars and customize
-
-aws_region  = "us-east-1"
-environment = "dev"
-name_prefix = "aria"

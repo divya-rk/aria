@@ -1,16 +1,16 @@
-# Aria Infrastructure as Code
+# Aria Infrastructure (AWS CDK)
 
-Terraform modules for deploying Aria data pipeline on AWS.
+AWS CDK Python infrastructure for the Aria data pipeline.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              STACKS                                         │
+│                              CDK STACKS                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌─────────────┐                                                            │
-│  │   SHARED    │  VPC (optional), EKS, S3 buckets, DynamoDB                │
+│  │   SHARED    │  EKS cluster, S3 buckets, DynamoDB                        │
 │  └──────┬──────┘                                                            │
 │         │                                                                   │
 │         ├──────────────┬──────────────┬──────────────┬──────────────┐      │
@@ -19,127 +19,85 @@ Terraform modules for deploying Aria data pipeline on AWS.
 │  │ COLLECTION │ │ HYDRATION  │ │  CURATION  │ │ EMBEDDING  │ │TOKENIZE  │ │
 │  │            │ │            │ │            │ │            │ │          │ │
 │  │ S3 Events  │ │ GPU Nodes  │ │ CPU Nodes  │ │ CPU Nodes  │ │CPU Nodes │ │
-│  │ SQS Queue  │ │ SQS Queue  │ │ SQS Queue  │ │ SQS Queue  │ │Dashboard │ │
-│  │ Lambda     │ │ IAM Policy │ │ Alarms     │ │ LanceDB    │ │          │ │
+│  │ SQS + DLQ  │ │ SQS + DLQ  │ │ SQS + DLQ  │ │ SQS + DLQ  │ │Dashboard │ │
 │  └────────────┘ └────────────┘ └────────────┘ └────────────┘ └──────────┘ │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Directory Structure
+## Prerequisites
 
-```
-iac/
-├── modules/           # Reusable Terraform modules
-│   ├── eks/          # EKS cluster, node IAM roles
-│   ├── s3/           # S3 buckets with lifecycle
-│   ├── sqs/          # SQS queues with DLQ
-│   └── dynamodb/     # DynamoDB tables
-│
-├── shared/           # Shared infrastructure (deploy first)
-├── collection/       # S3 events, SQS, Lambda validator
-├── hydration/        # GPU node group for Whisper
-├── curation/         # CPU node group for quality/dedup
-├── embedding/        # CPU nodes, LanceDB S3 access
-└── tokenization/     # CPU nodes, training data output
-```
+- Python 3.11+
+- AWS CDK CLI: `npm install -g aws-cdk`
+- AWS credentials configured
 
-## Deployment Order
+## Setup
 
 ```bash
-# 1. Deploy shared infrastructure first
-cd shared
-terraform init
-terraform apply
+cd iac
 
-# 2. Deploy pipeline stacks (can be parallel)
-cd ../collection && terraform init && terraform apply
-cd ../hydration && terraform init && terraform apply
-cd ../curation && terraform init && terraform apply
-cd ../embedding && terraform init && terraform apply
-cd ../tokenization && terraform init && terraform apply
+# Create virtual environment
+uv venv
+source .venv/bin/activate
+
+# Install dependencies
+uv pip install -e .
+
+# Bootstrap CDK (first time only)
+cdk bootstrap
 ```
 
-## Stack Dependencies
+## Deployment
 
-| Stack | Depends On | Outputs Used |
-|-------|------------|--------------|
-| shared | - | vpc_id, subnet_ids, eks_*, s3_*, dynamodb_* |
-| collection | shared | s3_raw_bucket_arn, s3_raw_bucket_id |
-| hydration | shared | eks_cluster_name, eks_node_role_arn, subnet_ids |
-| curation | shared | eks_cluster_name, eks_node_role_arn, subnet_ids |
-| embedding | shared | eks_cluster_name, eks_node_role_arn, subnet_ids, s3_lancedb_bucket |
-| tokenization | shared | eks_cluster_name, eks_node_role_arn, subnet_ids, s3_output_bucket |
+```bash
+# Deploy all stacks
+cdk deploy --all
+
+# Deploy specific stack
+cdk deploy aria-shared-dev
+
+# Deploy with specific environment
+cdk deploy --all --context environment=prod
+```
+
+## Stacks
+
+| Stack | Resources |
+|-------|-----------|
+| **shared** | EKS cluster, S3 buckets (raw, output, lancedb), DynamoDB |
+| **collection** | SQS queue, S3 event notifications, DLQ alarms |
+| **hydration** | GPU node group (g4dn spot), SQS queue |
+| **curation** | CPU node group (c5 spot), SQS queue |
+| **embedding** | CPU node group, LanceDB S3 access |
+| **tokenization** | CPU node group, CloudWatch dashboard |
 
 ## Configuration
 
-### Environment Variables
+Edit `cdk.json` context:
 
-Create `terraform.tfvars` in each stack:
-
-```hcl
-# shared/terraform.tfvars
-aws_region  = "us-east-1"
-environment = "dev"
-name_prefix = "aria"
-```
-
-```hcl
-# hydration/terraform.tfvars
-aws_region         = "us-east-1"
-environment        = "dev"
-eks_cluster_name   = "aria-eks"
-eks_node_role_arn  = "arn:aws:iam::xxx:role/aria-eks-node-role"
-subnet_ids         = ["subnet-xxx", "subnet-yyy"]
-gpu_min_size       = 0
-gpu_max_size       = 10
-use_spot_instances = true
-```
-
-### Remote State
-
-For team collaboration, configure S3 backend:
-
-```hcl
-# In each stack's main.tf
-terraform {
-  backend "s3" {
-    bucket         = "aria-terraform-state"
-    key            = "shared/terraform.tfstate"  # Change per stack
-    region         = "us-east-1"
-    dynamodb_table = "aria-terraform-locks"
-    encrypt        = true
+```json
+{
+  "context": {
+    "environment": "dev",
+    "project": "aria",
+    "region": "us-east-1"
   }
 }
 ```
 
+## Useful Commands
+
+```bash
+cdk ls              # List all stacks
+cdk synth           # Synthesize CloudFormation
+cdk diff            # Compare with deployed
+cdk deploy --all    # Deploy all stacks
+cdk destroy --all   # Destroy all stacks
+```
+
 ## Cost Optimization
 
-| Feature | Implementation |
-|---------|---------------|
-| Spot Instances | GPU and CPU node groups use spot by default |
-| Scale to Zero | All node groups have `min_size = 0` |
-| Lifecycle Rules | S3 buckets auto-tier to IA/Glacier |
-| Pay-per-request | DynamoDB uses on-demand billing |
-
-## Modules
-
-### EKS Module
-- EKS cluster with OIDC provider
-- Node IAM role with S3 access
-- Cluster logging enabled
-
-### S3 Module
-- Server-side encryption
-- Lifecycle rules for cost optimization
-- Optional event notifications
-
-### SQS Module
-- Dead letter queue
-- CloudWatch alarms for DLQ depth
-- S3 notification permissions
-
-### DynamoDB Module
-- On-demand billing
-- Point-in-time recovery
-- GSI for status queries
+- All node groups use **Spot instances**
+- GPU/CPU nodes **scale to zero** when idle
+- S3 lifecycle rules auto-tier to IA/Glacier
+- DynamoDB uses **pay-per-request** billing

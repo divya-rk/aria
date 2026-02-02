@@ -1,0 +1,24 @@
+[project]
+name = "aria-iac"
+version = "0.1.0"
+description = "Aria infrastructure using AWS CDK"
+requires-python = ">=3.11"
+
+dependencies = [
+    "aws-cdk-lib>=2.130.0",
+    "constructs>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4.4",
+    "mypy>=1.10.0",
+    "pytest>=8.0.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "RUF"]

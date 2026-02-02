@@ -1,28 +1,16 @@
-# Terraform
-*.tfstate
-*.tfstate.*
-.terraform/
-.terraform.lock.hcl
-*.tfvars
-!*.tfvars.example
+# CDK
+cdk.out/
+cdk.context.json
 
-# Crash logs
-crash.log
-crash.*.log
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
 
-# Generated files
-override.tf
-override.tf.json
-*_override.tf
-*_override.tf.json
-
-# Sensitive files
-*.pem
-*.key
-secrets.auto.tfvars
-
-# Lambda zips
-**/*.zip
+# IDE
+.idea/
+.vscode/
 
 # OS
 .DS_Store
