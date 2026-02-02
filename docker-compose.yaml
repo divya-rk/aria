@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # Local DynamoDB for development
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: aria-dynamodb
+    ports:
+      - "8000:8000"
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /data"
+    volumes:
+      - dynamodb-data:/data
+
+  # LocalStack for S3/SQS emulation
+  localstack:
+    image: localstack/localstack:latest
+    container_name: aria-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,sqs
+      - DEBUG=1
+      - DATA_DIR=/var/lib/localstack/data
+    volumes:
+      - localstack-data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # Aria API
+  aria-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aria-api
+    ports:
+      - "8080:8080"
+    environment:
+      - ENVIRONMENT=dev
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000
+      - S3_RAW_BUCKET=aria-raw
+      - S3_OUTPUT_BUCKET=aria-output
+      - LANCEDB_URI=/data/lancedb
+    volumes:
+      - lancedb-data:/data/lancedb
+    depends_on:
+      - dynamodb-local
+      - localstack
+    command: ["aria", "serve", "--host", "0.0.0.0", "--port", "8080"]
+
+volumes:
+  dynamodb-data:
+  localstack-data:
+  lancedb-data:

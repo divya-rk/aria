@@ -1,0 +1,202 @@
+[project]
+name = "aria"
+version = "0.1.0"
+description = "Audio Recognition and Ingestion Architecture - Scalable data pipeline for LLM training data"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Divya Kulkarni" }]
+keywords = ["audio", "pipeline", "llm", "data-engineering", "ray", "whisper"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    # Core
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "structlog>=23.0.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    # AWS
+    "boto3>=1.28.0",
+    "aiobotocore>=2.5.0",
+    # Ray
+    "ray[default]>=2.9.0",
+    # Audio Processing
+    "openai-whisper>=20231117",
+    "pyannote.audio>=3.0.0",
+    "pydub>=0.25.0",
+    # Embeddings & Vectors
+    "lancedb>=0.4.0",
+    "sentence-transformers>=2.2.0",
+    # Tokenization
+    "tiktoken>=0.5.0",
+    "transformers>=4.35.0",
+    # Data Processing
+    "polars>=0.19.0",
+    "pyarrow>=14.0.0",
+    # Quality & Dedup
+    "datasketch>=1.6.0",
+    "langdetect>=1.0.9",
+    "presidio-analyzer>=2.2.0",
+    "presidio-anonymizer>=2.2.0",
+    # Orchestration
+    "dagster>=1.5.0",
+    "dagster-aws>=0.21.0",
+    "dagster-ray>=0.1.0",
+    # API
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.14.0",
+    "pytest-watch>=4.2.0",
+    "moto[all]>=5.0.0",
+    # Linting & Formatting
+    "ruff>=0.4.4",
+    "mypy>=1.10.0",
+    "pre-commit>=3.7.0",
+    # Type stubs
+    "boto3-stubs[dynamodb,s3,sqs]>=1.34.0",
+    "types-requests>=2.31.0",
+]
+
+[project.scripts]
+aria = "aria.query.cli:app"
+
+[project.entry-points."dagster"]
+aria = "aria.orchestration"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aria"]
+
+# ============================================================================
+# RUFF - Linting & Formatting (https://docs.astral.sh/ruff/)
+# ============================================================================
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "PTH",    # flake8-use-pathlib
+    "ERA",    # eradicate (commented code)
+    "PL",     # pylint
+    "PERF",   # performance anti-patterns
+    "RUF",    # Ruff-specific rules
+]
+ignore = [
+    "E501",    # line too long (handled by formatter)
+    "PLR0913", # too many arguments
+    "PLR2004", # magic value comparison
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["ARG", "PLR2004"]
+"src/aria/orchestration/**/*" = ["ARG"]  # Dagster uses unused context args
+
+[tool.ruff.lint.isort]
+known-first-party = ["aria"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+# ============================================================================
+# MYPY - Type Checking
+# ============================================================================
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_configs = true
+show_error_codes = true
+files = ["src/aria"]
+
+[[tool.mypy.overrides]]
+module = [
+    "whisper.*",
+    "pyannote.*",
+    "lancedb.*",
+    "datasketch.*",
+    "langdetect.*",
+    "presidio_analyzer.*",
+    "presidio_anonymizer.*",
+    "ray.*",
+    "dagster.*",
+    "dagster_aws.*",
+]
+ignore_missing_imports = true
+
+# ============================================================================
+# PYTEST - Testing
+# ============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "-ra",
+]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "slow: Slow running tests",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src/aria"]
+branch = true
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
