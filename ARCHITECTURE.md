@@ -2,13 +2,13 @@
 
 ## Overview
 
-Aria is a scalable data pipeline for processing millions of audio files into LLM-ready training data.
+Aria is a scalable data pipeline for processing millions of audio files into LLM-ready training data. The pipeline uses an SQS-driven architecture where each stage has its own input queue, enabling failure recovery and independent scaling.
 
 ## High-Level Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              ARIA DATA PIPELINE                                     │
+│                           ARIA SQS-DRIVEN PIPELINE                                   │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 
      ┌──────────────┐
@@ -16,233 +16,371 @@ Aria is a scalable data pipeline for processing millions of audio files into LLM
      │   Audio      │
      │   (Millions) │
      └──────┬───────┘
-            │
+            │ S3 Event Notification
             ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              1. COLLECTION                                          │
-│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐                 │
-│  │  S3 Inventory   │    │   S3 Event      │    │     Lambda      │                 │
-│  │  (Backfill)     │───▶│  Notifications  │───▶│   (Validator)   │                 │
-│  └─────────────────┘    └─────────────────┘    └────────┬────────┘                 │
-│                                                         │                           │
-│                                          ┌──────────────┴──────────────┐            │
-│                                          ▼                             ▼            │
-│                                   ┌────────────┐                ┌────────────┐     │
-│                                   │ SQS Queue  │                │  SQS DLQ   │     │
-│                                   │ (Process)  │                │ (Invalid)  │     │
-│                                   └─────┬──────┘                └────────────┘     │
-└─────────────────────────────────────────┼───────────────────────────────────────────┘
-                                          │
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              2. HYDRATION (GPU)                                     │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐   │
-│  │                         EKS + Ray Cluster                                    │   │
-│  │   ┌───────────┐    ┌─────────────────────────────────────────────────────┐  │   │
-│  │   │ Ray Head  │    │            GPU Workers (g4dn.xlarge)                │  │   │
-│  │   │           │◄───│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐   │  │   │
-│  │   │ Scheduler │    │  │ Whisper │ │ Whisper │ │ Whisper │ │ Whisper │   │  │   │
-│  │   └───────────┘    │  │ large-v3│ │ large-v3│ │ large-v3│ │ large-v3│   │  │   │
-│  │                    │  └─────────┘ └─────────┘ └─────────┘ └─────────┘   │  │   │
-│  │                    └─────────────────────────────────────────────────────┘  │   │
-│  └─────────────────────────────────────────────────────────────────────────────┘   │
-│                                                                                     │
-│  Output: JSON with transcript, confidence, segments, language                       │
-└─────────────────────────────────────────────────────────────────────────────────────┘
-                                          │
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              3. CURATION (CPU)                                      │
-│                                                                                     │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐        │
-│  │   Quality    │──▶│   Language   │──▶│     PII      │──▶│    Dedup     │        │
-│  │   Scoring    │   │   Detection  │   │   Filtering  │   │  (MinHash)   │        │
-│  └──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘        │
-│                                                                                     │
-│  Quality Tiers:  HIGH (>0.8) │ MEDIUM (0.6-0.8) │ LOW (0.4-0.6) │ REJECTED (<0.4) │
-└─────────────────────────────────────────────────────────────────────────────────────┘
-                                          │
-                    ┌─────────────────────┴─────────────────────┐
-                    ▼                                           ▼
-┌─────────────────────────────────────────┐   ┌─────────────────────────────────────┐
-│           4. EMBEDDING                  │   │         5. TOKENIZATION             │
-│                                         │   │                                     │
-│  ┌──────────────┐   ┌──────────────┐   │   │  ┌──────────────┐   ┌────────────┐ │
-│  │    Text      │──▶│   Sentence   │   │   │  │   Tiktoken   │──▶│   Shard    │ │
-│  │   Chunking   │   │  Transformer │   │   │  │  Tokenizer   │   │  Creator   │ │
-│  │  (512 tok)   │   │  Embeddings  │   │   │  │              │   │ (100M tok) │ │
-│  └──────────────┘   └──────────────┘   │   │  └──────────────┘   └────────────┘ │
-│           │                             │   │                            │       │
-│           ▼                             │   │                            ▼       │
-│  ┌──────────────────────┐              │   │  ┌──────────────────────────────┐  │
-│  │      LanceDB         │              │   │  │    S3: Parquet Shards        │  │
-│  │   (Vector Store)     │              │   │  │    + manifest.json           │  │
-│  │                      │              │   │  │                              │  │
-│  │  • Similarity search │              │   │  │  Ready for LLM pre-training  │  │
-│  │  • Hybrid BM25+kNN   │              │   │  │                              │  │
-│  └──────────────────────┘              │   │  └──────────────────────────────┘  │
-└─────────────────────────────────────────┘   └─────────────────────────────────────┘
-                    │                                           │
-                    └─────────────────────┬─────────────────────┘
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              STORAGE & STATE                                        │
-│                                                                                     │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐                  │
-│  │    DynamoDB      │  │     LanceDB      │  │       S3         │                  │
-│  │   (Job State)    │  │  (Vector Store)  │  │   (Data Lake)    │                  │
-│  │                  │  │                  │  │                  │                  │
-│  │ • file_id (PK)   │  │ • id             │  │ /hydrated/       │                  │
-│  │ • stage (SK)     │  │ • file_id        │  │ /curated/high/   │                  │
-│  │ • status         │  │ • text           │  │ /curated/medium/ │                  │
-│  │ • quality_score  │  │ • vector[1536]   │  │ /shards/         │                  │
-│  │ • output_location│  │ • metadata       │  │ /rejected/       │                  │
-│  └──────────────────┘  └──────────────────┘  └──────────────────┘                  │
+│                              SQS-DRIVEN PIPELINE                                     │
+│                                                                                      │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐          │
+│  │  Hydration  │    │  Curation   │    │  Embedding  │    │Tokenization │          │
+│  │ Input Queue │───▶│ Input Queue │───▶│ Input Queue │───▶│ Input Queue │          │
+│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘    └──────┬──────┘          │
+│         │                  │                  │                  │                  │
+│    ┌────┴────┐        ┌────┴────┐        ┌────┴────┐        ┌────┴────┐            │
+│    │   DLQ   │        │   DLQ   │        │   DLQ   │        │   DLQ   │            │
+│    └─────────┘        └─────────┘        └─────────┘        └─────────┘            │
+│                                                                                      │
+│  Each stage: Consume from input queue → Process → Produce to next queue             │
+│  On failure: Message goes to DLQ after 3 retries → Manual inspection/retry          │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 
+                                          │
+                                          ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              ORCHESTRATION                                          │
-│                                                                                     │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐   │
-│  │                           Dagster                                            │   │
-│  │                                                                              │   │
-│  │   Assets:  raw_audio → hydrated → curated → embedded → tokenized_shards     │   │
-│  │   Sensors: SQS queue depth, training data threshold                          │   │
-│  │   Jobs:    full_pipeline, hydration_only, training_data                      │   │
-│  └─────────────────────────────────────────────────────────────────────────────┘   │
+│                              EKS CLUSTER + KARPENTER                                 │
+│                                                                                      │
+│  ┌───────────────────────────────────────────────────────────────────────────────┐  │
+│  │                         KARPENTER NODE PROVISIONER                             │  │
+│  │                                                                                │  │
+│  │   ┌──────────────────────────┐    ┌──────────────────────────────────────┐   │  │
+│  │   │     GPU NodePool         │    │          CPU NodePool                 │   │  │
+│  │   │   (hydration workloads)  │    │   (curation/embedding/tokenization)  │   │  │
+│  │   │                          │    │                                       │   │  │
+│  │   │   • g4dn.xlarge/2xlarge  │    │   • c6i.xlarge-4xlarge (compute)     │   │  │
+│  │   │   • Spot preferred       │    │   • m6i.xlarge-4xlarge (general)     │   │  │
+│  │   │   • GPU taint            │    │   • Spot preferred                   │   │  │
+│  │   │   • Scale 0-100 nodes    │    │   • Scale 0-200 nodes                │   │  │
+│  │   └──────────────────────────┘    └──────────────────────────────────────┘   │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                      │
+│  ┌───────────────────────────────────────────────────────────────────────────────┐  │
+│  │                              KEDA AUTOSCALER                                   │  │
+│  │                                                                                │  │
+│  │   ScaledObject per stage: Scales pods based on SQS ApproximateMessages        │  │
+│  │                                                                                │  │
+│  │   hydration-worker: 5 msgs/pod, max 20 pods, cooldown 300s (GPU expensive)    │  │
+│  │   curation-worker:  10 msgs/pod, max 30 pods, cooldown 120s                   │  │
+│  │   embedding-worker: 10 msgs/pod, max 20 pods, cooldown 120s                   │  │
+│  │   tokenization-worker: 20 msgs/pod, max 10 pods, cooldown 300s                │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## SQS-Driven Pipeline Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           DETAILED PIPELINE FLOW                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 
+  S3 Upload                                                                    S3 Output
+     │                                                                              ▲
+     │ *.mp3, *.wav, *.flac, *.m4a, *.ogg, *.webm                                  │
+     ▼                                                                              │
+┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐
+│   S3    │────▶│Hydration│────▶│Curation │────▶│Embedding│────▶│Tokenizn │────▶│ Shards  │
+│  Event  │     │  Input  │     │  Input  │     │  Input  │     │  Input  │     │ Parquet │
+│         │     │  Queue  │     │  Queue  │     │  Queue  │     │  Queue  │     │         │
+└─────────┘     └────┬────┘     └────┬────┘     └────┬────┘     └────┬────┘     └─────────┘
+                     │               │               │               │
+                     ▼               ▼               ▼               ▼
+              ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+              │ Hydration│    │ Curation │    │ Embedding│    │Tokenizn  │
+              │  Worker  │    │  Worker  │    │  Worker  │    │  Worker  │
+              │  (GPU)   │    │  (CPU)   │    │  (CPU)   │    │  (CPU)   │
+              │          │    │          │    │          │    │          │
+              │ Whisper  │    │ Quality  │    │ Vector   │    │ tiktoken │
+              │ large-v3 │    │ MinHash  │    │ LanceDB  │    │ Sharder  │
+              │          │    │ Presidio │    │          │    │          │
+              └──────────┘    └──────────┘    └──────────┘    └──────────┘
+                     │               │               │               │
+                     ▼               ▼               ▼               ▼
+              ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+              │   DLQ    │    │   DLQ    │    │   DLQ    │    │   DLQ    │
+              │(3 retries│    │(3 retries│    │(3 retries│    │(3 retries│
+              │ → manual)│    │ → manual)│    │ → manual)│    │ → manual)│
+              └──────────┘    └──────────┘    └──────────┘    └──────────┘
+
+Key Features:
+• Each queue acts as a BREAKPOINT - failures don't propagate downstream
+• DLQ captures failures after 3 retries for manual inspection
+• Workers scale independently based on queue depth (KEDA)
+• Nodes scale dynamically based on pod demand (Karpenter)
+• Scale to zero when queues are empty (cost optimization)
+```
+
+---
+
+## Karpenter Node Autoscaling
+
+```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                              OBSERVABILITY                                          │
-│                                                                                     │
-│  CloudWatch          Prometheus/Grafana       Alerts                               │
-│  • SQS depth         • Ray metrics            • DLQ > threshold                    │
-│  • Lambda errors     • GPU utilization        • Pipeline stalled                   │
-│  • DLQ counts        • Processing rate        • Quality degradation                │
+│                           KARPENTER ARCHITECTURE                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
+
+                              ┌────────────────────┐
+                              │  Karpenter         │
+                              │  Controller        │
+                              │                    │
+                              │  Watches pending   │
+                              │  pods, provisions  │
+                              │  optimal nodes     │
+                              └─────────┬──────────┘
+                                        │
+           ┌────────────────────────────┴────────────────────────────┐
+           ▼                                                         ▼
+   ┌───────────────────┐                                    ┌───────────────────┐
+   │  GPU NodePool     │                                    │  CPU NodePool     │
+   │                   │                                    │                   │
+   │  Label: gpu       │                                    │  Label: cpu       │
+   │  Workload:        │                                    │  Workload:        │
+   │    hydration      │                                    │    curation       │
+   │                   │                                    │    embedding      │
+   │  Instances:       │                                    │    tokenization   │
+   │    g4dn.xlarge    │                                    │                   │
+   │    g4dn.2xlarge   │                                    │  Instances:       │
+   │                   │                                    │    c6i.xlarge     │
+   │  Capacity:        │                                    │    c6i.2xlarge    │
+   │    spot (pref)    │                                    │    c6i.4xlarge    │
+   │    on-demand      │                                    │    m6i.xlarge     │
+   │                   │                                    │    m6i.2xlarge    │
+   │  Taint:           │                                    │                   │
+   │    nvidia.com/gpu │                                    │  Capacity:        │
+   │                   │                                    │    spot (pref)    │
+   │  Disruption:      │                                    │    on-demand      │
+   │    consolidate    │                                    │                   │
+   │    when empty     │                                    │  Disruption:      │
+   │    after 30s      │                                    │    consolidate    │
+   └───────────────────┘                                    │    when empty     │
+                                                            │    after 30s      │
+                                                            └───────────────────┘
+
+Benefits over Managed Node Groups:
+• Faster scaling (30-60s vs 5-10min)
+• Right-sized instances for each workload
+• Automatic consolidation reduces waste
+• Native spot instance support with fallback
+• Scale to zero capability
+```
+
+---
+
+## KEDA Pod Autoscaling
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           KEDA SCALEDOBJECTS                                         │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+  SQS Queue                ScaledObject                      Deployment
+      │                        │                                 │
+      │  ApproximateMessages   │                                 │
+      │  Visible               │                                 │
+      ▼                        ▼                                 ▼
+┌──────────────┐        ┌──────────────┐                 ┌──────────────┐
+│ aria-        │        │ hydration-   │                 │ hydration-   │
+│ hydration-   │───────▶│ scaledobject │────────────────▶│ worker       │
+│ input-dev    │        │              │                 │              │
+│              │        │ queueLength:5│                 │ replicas:    │
+│ ~100 msgs    │        │ min: 0       │                 │   0-20       │
+│              │        │ max: 20      │                 │              │
+└──────────────┘        │ cooldown:300s│                 │ (GPU pods)   │
+                        └──────────────┘                 └──────────────┘
+
+                        ┌──────────────┐                 ┌──────────────┐
+                        │ curation-    │                 │ curation-    │
+┌──────────────┐        │ scaledobject │                 │ worker       │
+│ aria-        │───────▶│              │────────────────▶│              │
+│ curation-    │        │ queueLength:10                │ replicas:    │
+│ input-dev    │        │ min: 0       │                 │   0-30       │
+└──────────────┘        │ max: 30      │                 └──────────────┘
+                        └──────────────┘
+
+Scaling Formula: replicas = ceil(messagesVisible / queueLength)
+
+Example: 150 messages in curation queue
+         queueLength = 10
+         replicas = ceil(150/10) = 15 pods
 ```
 
 ---
 
 ## Pipeline Stages
 
-| Stage | Purpose | Technology | Input | Output |
-|-------|---------|------------|-------|--------|
-| **Collection** | Ingest files from S3 | S3 Events, SQS, Lambda | S3 audio files | SQS messages |
-| **Hydration** | Transcribe audio | Ray, Whisper, EKS GPU | Audio bytes | JSON transcripts |
-| **Curation** | Quality filter | MinHash, Presidio, langdetect | Transcripts | Curated JSON |
-| **Embedding** | Vectorize for search | Sentence Transformers, LanceDB | Curated text | Vector embeddings |
-| **Tokenization** | Prepare for LLM | tiktoken, PyArrow | Curated text | Parquet shards |
+| Stage | Purpose | Technology | Input Queue | Output Queue | Worker Scaling |
+|-------|---------|------------|-------------|--------------|----------------|
+| **Collection** | Ingest files from S3 | S3 Events → SQS | S3 Event | Hydration Input | N/A (event-driven) |
+| **Hydration** | Transcribe audio | Ray, Whisper, GPU | Hydration Input | Curation Input | 0-20 pods, 5 msg/pod |
+| **Curation** | Quality filter | MinHash, Presidio | Curation Input | Embedding Input | 0-30 pods, 10 msg/pod |
+| **Embedding** | Vectorize for search | Sentence Transformers | Embedding Input | Tokenization Input | 0-20 pods, 10 msg/pod |
+| **Tokenization** | Prepare for LLM | tiktoken, PyArrow | Tokenization Input | S3 Shards | 0-10 pods, 20 msg/pod |
 
 ---
 
-## Key Components
+## Failure Recovery
 
-### Collection
 ```
-S3 Inventory (backfill)  ──┐
-                           ├──▶ Lambda (validate) ──▶ SQS Queue
-S3 Event Notifications ────┘                              │
-                                                          ▼
-                                                    Invalid → DLQ
-```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           FAILURE RECOVERY MODEL                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 
-### Hydration (GPU Processing)
-```
-SQS Message
-    │
-    ▼
-┌─────────────────────────────────────────┐
-│  Ray Actor: WhisperTranscriber          │
-│  ├── Download audio from S3             │
-│  ├── Transcode to WAV                   │
-│  ├── Run Whisper ASR                    │
-│  ├── Extract segments + confidence      │
-│  └── Upload JSON to S3                  │
-└─────────────────────────────────────────┘
-    │
-    ▼
-s3://output/hydrated/{file_id}.json
-```
+  Message Processing Lifecycle:
 
-### Curation Pipeline
-```
-Input JSON
-    │
-    ├──▶ QualityScorer
-    │       • Confidence score
-    │       • Language detection
-    │       • Word count / length
-    │       • Repetition detection
-    │
-    ├──▶ Deduplicator (MinHash LSH)
-    │       • Near-duplicate detection
-    │       • Jaccard similarity > 0.8
-    │
-    ├──▶ PIIFilter (Presidio)
-    │       • Email, phone, SSN
-    │       • Names, addresses
-    │       • Redact or flag
-    │
-    ▼
-s3://output/curated/{tier}/{file_id}.json
-```
+  1. Message arrives in queue
+         │
+         ▼
+  2. Worker receives message (visibility timeout starts)
+         │
+         ├──▶ SUCCESS: Delete message, send to next queue
+         │
+         └──▶ FAILURE: Message returns to queue after visibility timeout
+                   │
+                   ├──▶ Retry 1: Process again
+                   │
+                   ├──▶ Retry 2: Process again
+                   │
+                   └──▶ Retry 3: Move to DLQ
+                             │
+                             ▼
+                        ┌─────────┐
+                        │   DLQ   │ ◀── CloudWatch Alarm (threshold: 10-20)
+                        └─────────┘
+                             │
+                             ▼
+                        Manual inspection:
+                        • Check error logs
+                        • Fix root cause
+                        • Redrive to main queue
 
-### Embedding Pipeline
-```
-Curated JSON
-    │
-    ├──▶ TextChunker
-    │       • 512 token chunks
-    │       • 50 token overlap
-    │
-    ├──▶ TextEmbedder
-    │       • sentence-transformers
-    │       • 1536-dim vectors
-    │
-    ▼
-LanceDB (vector store)
-    • Similarity search
-    • Filter by quality
-    • Retrieve by file_id
-```
-
-### Tokenization Pipeline
-```
-Curated JSON (high quality)
-    │
-    ├──▶ Tokenizer (tiktoken)
-    │       • GPT-4 tokenizer
-    │       • Count tokens
-    │
-    ├──▶ Sharder
-    │       • 100M tokens per shard
-    │       • Track source file_ids
-    │
-    ▼
-s3://output/shards/
-    ├── shard_00000.parquet
-    ├── shard_00001.parquet
-    └── manifest.json
+  Breakpoint Benefits:
+  ┌──────────────────────────────────────────────────────────────────────────────┐
+  │  • Stage failure doesn't affect other stages                                  │
+  │  • Messages persist in queue (14 day retention)                               │
+  │  • Can pause/resume any stage independently                                   │
+  │  • Replay from any point by redriving DLQ                                     │
+  │  • Easy debugging: inspect DLQ messages for failure patterns                  │
+  └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Data Flow Summary
+## AWS CDK Stack Architecture
 
 ```
-┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
-│  S3     │───▶│  SQS    │───▶│  EKS    │───▶│  S3     │───▶│ LanceDB │
-│  Raw    │    │  Queue  │    │  Ray    │    │ Curated │    │ Vectors │
-│  Audio  │    │         │    │ Whisper │    │         │    │         │
-└─────────┘    └─────────┘    └─────────┘    └─────────┘    └─────────┘
-                                                  │
-                                                  ▼
-                                            ┌─────────┐
-                                            │   S3    │
-                                            │ Shards  │
-                                            │ (LLM)   │
-                                            └─────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           CDK STACK DEPENDENCIES                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                        SharedStack                               │
+  │                                                                  │
+  │  • EKS Cluster (with Karpenter)                                 │
+  │  • GPU NodePool (g4dn instances)                                │
+  │  • CPU NodePool (c6i/m6i instances)                             │
+  │  • S3 Buckets (raw, output, lancedb)                            │
+  │  • DynamoDB Table (pipeline state)                              │
+  └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                      CollectionStack                             │
+  │                                                                  │
+  │  • Hydration Input Queue + DLQ                                  │
+  │  • S3 Event Notifications (audio files → queue)                 │
+  │  • CloudWatch Alarm (DLQ threshold)                             │
+  └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                       HydrationStack                             │
+  │                                                                  │
+  │  • Curation Input Queue + DLQ                                   │
+  │  • KEDA Helm Chart                                              │
+  │  • Hydration ScaledObject (SQS trigger)                         │
+  └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                        CurationStack                             │
+  │                                                                  │
+  │  • Embedding Input Queue + DLQ                                  │
+  │  • Curation ScaledObject                                        │
+  └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                       EmbeddingStack                             │
+  │                                                                  │
+  │  • Tokenization Input Queue + DLQ                               │
+  │  • Embedding ScaledObject                                       │
+  └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     TokenizationStack                            │
+  │                                                                  │
+  │  • Tokenization ScaledObject                                    │
+  │  • CloudWatch Pipeline Dashboard                                │
+  │  • Output: S3 Shards                                            │
+  └─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Storage & State
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              STORAGE & STATE                                         │
+│                                                                                      │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐                   │
+│  │    DynamoDB      │  │     LanceDB      │  │       S3         │                   │
+│  │   (Job State)    │  │  (Vector Store)  │  │   (Data Lake)    │                   │
+│  │                  │  │                  │  │                  │                   │
+│  │ • file_id (PK)   │  │ • id             │  │ /raw/            │                   │
+│  │ • stage (SK)     │  │ • file_id        │  │ /hydrated/       │                   │
+│  │ • status         │  │ • text           │  │ /curated/high/   │                   │
+│  │ • quality_score  │  │ • vector[1536]   │  │ /curated/medium/ │                   │
+│  │ • output_location│  │ • metadata       │  │ /shards/         │                   │
+│  └──────────────────┘  └──────────────────┘  │ /rejected/       │                   │
+│                                              └──────────────────┘                   │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## CloudWatch Dashboard
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           PIPELINE DASHBOARD                                         │
+│                                                                                      │
+│  Pipeline Queue Depths                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────────────┐ │
+│  │     ▲                                                                          │ │
+│  │ 500 │        ╭──╮                                                              │ │
+│  │     │       ╱    ╲      Hydration ───                                          │ │
+│  │ 400 │      ╱      ╲     Curation  - - -                                        │ │
+│  │     │     ╱        ╲    Embedding ─ ─ ─                                        │ │
+│  │ 300 │    ╱          ╲   Tokenization ···                                       │ │
+│  │     │   ╱            ╲                                                         │ │
+│  │ 200 │  ╱              ╲                                                        │ │
+│  │     │ ╱                ╲                                                       │ │
+│  │ 100 │╱                  ╲────────────────                                      │ │
+│  │     │                                                                          │ │
+│  │   0 └────────────────────────────────────────────────────────────────▶ Time    │ │
+│  └────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                      │
+│  DLQ Messages (Failures)                    S3 Output Bucket                        │
+│  ┌─────────────────────────────────────┐   ┌─────────────────────────────────────┐ │
+│  │  Hydration DLQ:  ████░░░ 12         │   │  Bucket Size: 1.2 TB                │ │
+│  │  Curation DLQ:   ██░░░░░  5         │   │  Objects: 2.4M                      │ │
+│  │  Embedding DLQ:  █░░░░░░  2         │   │  Shards: 847                        │ │
+│  │  Tokenization:   ░░░░░░░  0         │   │                                     │ │
+│  └─────────────────────────────────────┘   └─────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -251,43 +389,14 @@ s3://output/shards/
 
 | Layer | Technology |
 |-------|------------|
-| **Compute** | EKS, Ray, Karpenter (autoscaling) |
-| **GPU** | g4dn.xlarge (Spot instances) |
+| **Compute** | EKS, Karpenter (node scaling), KEDA (pod scaling) |
+| **GPU** | g4dn.xlarge/2xlarge (Spot preferred) |
+| **CPU** | c6i/m6i instances (Spot preferred) |
+| **Queue** | SQS with DLQ (queue per stage) |
 | **Storage** | S3, DynamoDB, LanceDB |
-| **Queue** | SQS with DLQ |
-| **Orchestration** | Dagster |
+| **IaC** | AWS CDK (Python) |
 | **ML Models** | Whisper large-v3, Sentence Transformers |
-| **Observability** | CloudWatch, Prometheus, Grafana |
-
----
-
-## Error Handling
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     ERROR HANDLING                              │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Collection:                                                    │
-│    Invalid file format ──▶ DLQ (manual review)                 │
-│    File too large ──▶ DLQ                                      │
-│                                                                 │
-│  Hydration:                                                     │
-│    Transcription failed ──▶ Retry 3x ──▶ DLQ                   │
-│    GPU OOM ──▶ Retry with smaller batch                        │
-│    Spot interruption ──▶ Checkpoint + retry                    │
-│                                                                 │
-│  Curation:                                                      │
-│    Quality < 0.4 ──▶ Rejected bucket                           │
-│    Duplicate ──▶ Skip (logged)                                 │
-│    PII detected ──▶ Redact and continue                        │
-│                                                                 │
-│  Embedding:                                                     │
-│    Empty content ──▶ Skip                                      │
-│    Model error ──▶ Retry                                       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+| **Observability** | CloudWatch (dashboards, alarms) |
 
 ---
 
@@ -295,10 +404,34 @@ s3://output/shards/
 
 | Strategy | Implementation | Savings |
 |----------|---------------|---------|
-| Spot Instances | Karpenter + spot pools | ~70% |
-| Scale to Zero | No GPU nodes when idle | ~40% off-hours |
-| Right-sizing | g4dn.xlarge vs p3.2xlarge | ~50% |
+| Spot Instances | Karpenter spot pools with on-demand fallback | ~70% |
+| Scale to Zero | KEDA minReplicas=0, Karpenter consolidation | ~40% off-hours |
+| Right-sizing | Karpenter selects optimal instance type | ~30% |
+| Node Consolidation | Karpenter consolidates when pods finish | ~20% |
 | S3 Tiering | Intelligent tiering for old data | ~30% storage |
+
+---
+
+## Deployment Commands
+
+```bash
+# Install dependencies
+cd iac && uv pip install -r requirements.txt
+
+# Deploy all stacks
+cdk deploy --all -c environment=dev -c project=aria
+
+# Deploy specific stack
+cdk deploy aria-shared-dev
+cdk deploy aria-collection-dev
+cdk deploy aria-hydration-dev
+
+# Synthesize (preview)
+cdk synth
+
+# Diff changes
+cdk diff
+```
 
 ---
 
