@@ -1,0 +1,182 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: aria
+
+resources:
+  - ../../base
+
+namePrefix: ""
+nameSuffix: ""
+
+commonLabels:
+  environment: prod
+
+# Patch ConfigMaps with prod values
+patches:
+  - target:
+      kind: ConfigMap
+      name: aria-config
+    patch: |-
+      - op: replace
+        path: /data/AWS_REGION
+        value: "us-east-1"
+      - op: replace
+        path: /data/RAW_BUCKET
+        value: "aria-raw-prod"
+      - op: replace
+        path: /data/OUTPUT_BUCKET
+        value: "aria-output-prod"
+      - op: replace
+        path: /data/LANCEDB_BUCKET
+        value: "aria-lancedb-prod"
+      - op: replace
+        path: /data/DYNAMODB_TABLE
+        value: "aria-pipeline-state-prod"
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "INFO"
+      - op: replace
+        path: /data/BATCH_SIZE
+        value: "20"
+
+  - target:
+      kind: ConfigMap
+      name: aria-queues
+    patch: |-
+      - op: replace
+        path: /data/HYDRATION_INPUT_QUEUE_URL
+        value: "https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/aria-hydration-input-prod"
+      - op: replace
+        path: /data/CURATION_INPUT_QUEUE_URL
+        value: "https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/aria-curation-input-prod"
+      - op: replace
+        path: /data/EMBEDDING_INPUT_QUEUE_URL
+        value: "https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/aria-embedding-input-prod"
+      - op: replace
+        path: /data/TOKENIZATION_INPUT_QUEUE_URL
+        value: "https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/aria-tokenization-input-prod"
+
+  - target:
+      kind: ServiceAccount
+      name: aria-worker
+    patch: |-
+      - op: replace
+        path: /metadata/annotations/eks.amazonaws.com~1role-arn
+        value: "arn:aws:iam::ACCOUNT_ID:role/aria-worker-prod"
+
+  # Production resources - full capacity
+  - target:
+      kind: Deployment
+      name: hydration-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "12Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "14Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "4"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "6"
+
+  - target:
+      kind: Deployment
+      name: curation-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "4Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "6Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "2"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "4"
+
+  - target:
+      kind: Deployment
+      name: embedding-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "8Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "12Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "4"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "6"
+
+  - target:
+      kind: Deployment
+      name: tokenization-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "8Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "12Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "4"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "6"
+
+  # Production PDBs - ensure availability during disruptions
+  - target:
+      kind: PodDisruptionBudget
+      name: hydration-pdb
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 1
+
+  - target:
+      kind: PodDisruptionBudget
+      name: curation-pdb
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 2
+
+  - target:
+      kind: PodDisruptionBudget
+      name: embedding-pdb
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 1
+
+  - target:
+      kind: PodDisruptionBudget
+      name: tokenization-pdb
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 1
+
+images:
+  - name: ${ECR_REGISTRY}/aria-hydration
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/aria-hydration
+    newTag: prod
+  - name: ${ECR_REGISTRY}/aria-curation
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/aria-curation
+    newTag: prod
+  - name: ${ECR_REGISTRY}/aria-embedding
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/aria-embedding
+    newTag: prod
+  - name: ${ECR_REGISTRY}/aria-tokenization
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/aria-tokenization
+    newTag: prod

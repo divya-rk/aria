@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedding-worker
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: embedding
+    aria.io/stage: embedding
+spec:
+  replicas: 0  # KEDA manages replicas
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria
+      app.kubernetes.io/component: embedding
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aria
+        app.kubernetes.io/component: embedding
+        aria.io/stage: embedding
+        aria.io/node-type: cpu
+    spec:
+      serviceAccountName: aria-worker
+      terminationGracePeriodSeconds: 120
+
+      # Schedule on CPU nodes provisioned by Karpenter
+      nodeSelector:
+        aria.io/node-type: cpu
+
+      tolerations:
+        - key: karpenter.sh/disruption
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+
+      containers:
+        - name: embedding-worker
+          image: ${ECR_REGISTRY}/aria-embedding:${IMAGE_TAG}
+          imagePullPolicy: Always
+
+          command:
+            - python
+            - -m
+            - aria.embedding.worker
+
+          env:
+            - name: INPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-queues
+                  key: EMBEDDING_INPUT_QUEUE_URL
+            - name: OUTPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-queues
+                  key: TOKENIZATION_INPUT_QUEUE_URL
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: AWS_REGION
+            - name: OUTPUT_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: OUTPUT_BUCKET
+            - name: LANCEDB_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: LANCEDB_BUCKET
+            - name: DYNAMODB_TABLE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: DYNAMODB_TABLE
+            - name: EMBEDDING_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: EMBEDDING_MODEL
+            - name: EMBEDDING_DIMENSION
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: EMBEDDING_DIMENSION
+            - name: CHUNK_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: CHUNK_SIZE
+            - name: CHUNK_OVERLAP
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: CHUNK_OVERLAP
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: LOG_LEVEL
+            - name: BATCH_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: BATCH_SIZE
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0 if os.path.exists('/tmp/healthy') else 1)"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0 if os.path.exists('/tmp/ready') else 1)"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+            - name: lancedb-cache
+              mountPath: /app/lancedb
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: lancedb-cache
+          emptyDir:
+            sizeLimit: 5Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

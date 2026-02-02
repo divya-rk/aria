@@ -1,0 +1,47 @@
+# Hydration Worker - GPU-enabled for Whisper transcription
+FROM nvidia/cuda:12.1-cudnn8-runtime-ubuntu22.04
+
+# Prevent interactive prompts during build
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    ffmpeg \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Create app user
+RUN useradd -m -u 1000 aria
+WORKDIR /app
+
+# Install uv for fast package management
+RUN pip install uv
+
+# Copy dependency files
+COPY pyproject.toml ./
+
+# Install dependencies
+RUN uv pip install --system -e ".[hydration]"
+
+# Copy application code
+COPY src/aria /app/aria
+
+# Set ownership
+RUN chown -R aria:aria /app
+
+# Switch to non-root user
+USER aria
+
+# Health check markers
+RUN mkdir -p /tmp
+
+# Default command
+CMD ["python", "-m", "aria.hydration.worker"]

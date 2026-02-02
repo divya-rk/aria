@@ -1,0 +1,161 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hydration-worker
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: hydration
+    aria.io/stage: hydration
+spec:
+  replicas: 0  # KEDA manages replicas
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria
+      app.kubernetes.io/component: hydration
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aria
+        app.kubernetes.io/component: hydration
+        aria.io/stage: hydration
+        aria.io/node-type: gpu
+    spec:
+      serviceAccountName: aria-worker
+      terminationGracePeriodSeconds: 300  # Allow time to finish processing
+
+      # Schedule on GPU nodes provisioned by Karpenter
+      nodeSelector:
+        aria.io/node-type: gpu
+        aria.io/workload: hydration
+
+      # Tolerate GPU taint
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+        - key: karpenter.sh/disruption
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+
+      containers:
+        - name: hydration-worker
+          image: ${ECR_REGISTRY}/aria-hydration:${IMAGE_TAG}
+          imagePullPolicy: Always
+
+          command:
+            - python
+            - -m
+            - aria.hydration.worker
+
+          env:
+            # Queue URLs from ConfigMap/Secrets
+            - name: INPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-queues
+                  key: HYDRATION_INPUT_QUEUE_URL
+            - name: OUTPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-queues
+                  key: CURATION_INPUT_QUEUE_URL
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: AWS_REGION
+            - name: RAW_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: RAW_BUCKET
+            - name: OUTPUT_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: OUTPUT_BUCKET
+            - name: DYNAMODB_TABLE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: DYNAMODB_TABLE
+            - name: WHISPER_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: WHISPER_MODEL
+            - name: WHISPER_DEVICE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: WHISPER_DEVICE
+            - name: WHISPER_COMPUTE_TYPE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: WHISPER_COMPUTE_TYPE
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: LOG_LEVEL
+            # Pod identity
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "2"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "14Gi"
+              cpu: "4"
+              nvidia.com/gpu: "1"
+
+          # Liveness: process is running
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0 if os.path.exists('/tmp/healthy') else 1)"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          # Readiness: ready to process messages
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0 if os.path.exists('/tmp/ready') else 1)"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 5Gi

@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curation-worker
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: curation
+    aria.io/stage: curation
+spec:
+  replicas: 0  # KEDA manages replicas
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria
+      app.kubernetes.io/component: curation
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aria
+        app.kubernetes.io/component: curation
+        aria.io/stage: curation
+        aria.io/node-type: cpu
+    spec:
+      serviceAccountName: aria-worker
+      terminationGracePeriodSeconds: 120
+
+      # Schedule on CPU nodes provisioned by Karpenter
+      nodeSelector:
+        aria.io/node-type: cpu
+
+      tolerations:
+        - key: karpenter.sh/disruption
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+
+      containers:
+        - name: curation-worker
+          image: ${ECR_REGISTRY}/aria-curation:${IMAGE_TAG}
+          imagePullPolicy: Always
+
+          command:
+            - python
+            - -m
+            - aria.curation.worker
+
+          env:
+            - name: INPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-queues
+                  key: CURATION_INPUT_QUEUE_URL
+            - name: OUTPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-queues
+                  key: EMBEDDING_INPUT_QUEUE_URL
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: AWS_REGION
+            - name: OUTPUT_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: OUTPUT_BUCKET
+            - name: DYNAMODB_TABLE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: DYNAMODB_TABLE
+            - name: QUALITY_THRESHOLD_HIGH
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: QUALITY_THRESHOLD_HIGH
+            - name: QUALITY_THRESHOLD_MEDIUM
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: QUALITY_THRESHOLD_MEDIUM
+            - name: QUALITY_THRESHOLD_LOW
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: QUALITY_THRESHOLD_LOW
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: LOG_LEVEL
+            - name: BATCH_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: BATCH_SIZE
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0 if os.path.exists('/tmp/healthy') else 1)"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0 if os.path.exists('/tmp/ready') else 1)"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: minhash-cache
+              mountPath: /app/cache
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: minhash-cache
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

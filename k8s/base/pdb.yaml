@@ -1,0 +1,60 @@
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hydration-pdb
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: hydration
+spec:
+  minAvailable: 0  # Allow scale to zero
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria
+      app.kubernetes.io/component: hydration
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: curation-pdb
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: curation
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria
+      app.kubernetes.io/component: curation
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: embedding-pdb
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: embedding
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria
+      app.kubernetes.io/component: embedding
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tokenization-pdb
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: tokenization
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria
+      app.kubernetes.io/component: tokenization

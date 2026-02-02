@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tokenization-worker
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: tokenization
+    aria.io/stage: tokenization
+spec:
+  replicas: 0  # KEDA manages replicas
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aria
+      app.kubernetes.io/component: tokenization
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aria
+        app.kubernetes.io/component: tokenization
+        aria.io/stage: tokenization
+        aria.io/node-type: cpu
+    spec:
+      serviceAccountName: aria-worker
+      terminationGracePeriodSeconds: 180  # Longer for shard finalization
+
+      # Schedule on CPU nodes provisioned by Karpenter
+      nodeSelector:
+        aria.io/node-type: cpu
+
+      tolerations:
+        - key: karpenter.sh/disruption
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+
+      containers:
+        - name: tokenization-worker
+          image: ${ECR_REGISTRY}/aria-tokenization:${IMAGE_TAG}
+          imagePullPolicy: Always
+
+          command:
+            - python
+            - -m
+            - aria.tokenization.worker
+
+          env:
+            - name: INPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-queues
+                  key: TOKENIZATION_INPUT_QUEUE_URL
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: AWS_REGION
+            - name: OUTPUT_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: OUTPUT_BUCKET
+            - name: DYNAMODB_TABLE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: DYNAMODB_TABLE
+            - name: TOKENIZER_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: TOKENIZER_MODEL
+            - name: SHARD_SIZE_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: SHARD_SIZE_TOKENS
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: LOG_LEVEL
+            - name: BATCH_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: aria-config
+                  key: BATCH_SIZE
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0 if os.path.exists('/tmp/healthy') else 1)"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os; exit(0 if os.path.exists('/tmp/ready') else 1)"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: shard-buffer
+              mountPath: /app/shards
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: shard-buffer
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

@@ -1,0 +1,125 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: aria
+
+resources:
+  - ../../base
+
+namePrefix: ""
+nameSuffix: ""
+
+commonLabels:
+  environment: dev
+
+# Patch ConfigMaps with dev values
+patches:
+  - target:
+      kind: ConfigMap
+      name: aria-config
+    patch: |-
+      - op: replace
+        path: /data/AWS_REGION
+        value: "us-east-1"
+      - op: replace
+        path: /data/RAW_BUCKET
+        value: "aria-raw-dev"
+      - op: replace
+        path: /data/OUTPUT_BUCKET
+        value: "aria-output-dev"
+      - op: replace
+        path: /data/LANCEDB_BUCKET
+        value: "aria-lancedb-dev"
+      - op: replace
+        path: /data/DYNAMODB_TABLE
+        value: "aria-pipeline-state-dev"
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "DEBUG"
+      - op: replace
+        path: /data/BATCH_SIZE
+        value: "5"
+
+  - target:
+      kind: ConfigMap
+      name: aria-queues
+    patch: |-
+      - op: replace
+        path: /data/HYDRATION_INPUT_QUEUE_URL
+        value: "https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/aria-hydration-input-dev"
+      - op: replace
+        path: /data/CURATION_INPUT_QUEUE_URL
+        value: "https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/aria-curation-input-dev"
+      - op: replace
+        path: /data/EMBEDDING_INPUT_QUEUE_URL
+        value: "https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/aria-embedding-input-dev"
+      - op: replace
+        path: /data/TOKENIZATION_INPUT_QUEUE_URL
+        value: "https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/aria-tokenization-input-dev"
+
+  - target:
+      kind: ServiceAccount
+      name: aria-worker
+    patch: |-
+      - op: replace
+        path: /metadata/annotations/eks.amazonaws.com~1role-arn
+        value: "arn:aws:iam::ACCOUNT_ID:role/aria-worker-dev"
+
+  # Reduce resources for dev
+  - target:
+      kind: Deployment
+      name: hydration-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "4Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "8Gi"
+
+  - target:
+      kind: Deployment
+      name: curation-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "1Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "2Gi"
+
+  - target:
+      kind: Deployment
+      name: embedding-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "2Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "4Gi"
+
+  - target:
+      kind: Deployment
+      name: tokenization-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "2Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "4Gi"
+
+images:
+  - name: ${ECR_REGISTRY}/aria-hydration
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/aria-hydration
+    newTag: dev
+  - name: ${ECR_REGISTRY}/aria-curation
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/aria-curation
+    newTag: dev
+  - name: ${ECR_REGISTRY}/aria-embedding
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/aria-embedding
+    newTag: dev
+  - name: ${ECR_REGISTRY}/aria-tokenization
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/aria-tokenization
+    newTag: dev

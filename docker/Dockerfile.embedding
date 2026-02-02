@@ -1,0 +1,38 @@
+# Embedding Worker - CPU-based vector generation
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user
+RUN useradd -m -u 1000 aria
+WORKDIR /app
+
+# Install uv for fast package management
+RUN pip install uv
+
+# Copy dependency files
+COPY pyproject.toml ./
+
+# Install dependencies
+RUN uv pip install --system -e ".[embedding]"
+
+# Pre-download the embedding model
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# Copy application code
+COPY src/aria /app/aria
+
+# Set ownership
+RUN chown -R aria:aria /app
+
+# Switch to non-root user
+USER aria
+
+# Health check markers
+RUN mkdir -p /tmp
+
+# Default command
+CMD ["python", "-m", "aria.embedding.worker"]

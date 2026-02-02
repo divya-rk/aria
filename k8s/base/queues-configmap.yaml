@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aria-queues
+  namespace: aria
+  labels:
+    app.kubernetes.io/name: aria
+    app.kubernetes.io/component: config
+data:
+  # Queue URLs - will be patched per environment
+  HYDRATION_INPUT_QUEUE_URL: "https://sqs.${AWS_REGION}.amazonaws.com/${AWS_ACCOUNT_ID}/${PROJECT}-hydration-input-${ENVIRONMENT}"
+  CURATION_INPUT_QUEUE_URL: "https://sqs.${AWS_REGION}.amazonaws.com/${AWS_ACCOUNT_ID}/${PROJECT}-curation-input-${ENVIRONMENT}"
+  EMBEDDING_INPUT_QUEUE_URL: "https://sqs.${AWS_REGION}.amazonaws.com/${AWS_ACCOUNT_ID}/${PROJECT}-embedding-input-${ENVIRONMENT}"
+  TOKENIZATION_INPUT_QUEUE_URL: "https://sqs.${AWS_REGION}.amazonaws.com/${AWS_ACCOUNT_ID}/${PROJECT}-tokenization-input-${ENVIRONMENT}"
