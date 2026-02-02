@@ -1,275 +1,9 @@
-"""FastAPI application for query interface with web UI."""
+"""Web UI route."""
 
-from typing import Any
-
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
 
-from aria.common import get_logger, setup_logging
-from aria.config import get_settings
-from aria.query.search import VectorSearch
-from aria.query.validate import DataValidator
-
-
-# Initialize
-setup_logging()
-logger = get_logger(__name__)
-settings = get_settings()
-
-app = FastAPI(
-    title="Aria Query API",
-    description="Search and validate the Aria data pipeline",
-    version="0.1.0",
-)
-
-# Initialize services (lazy)
-_search: VectorSearch | None = None
-_validator: DataValidator | None = None
-
-
-def get_search() -> VectorSearch:
-    """Get or create search instance."""
-    global _search
-    if _search is None:
-        _search = VectorSearch(settings)
-    return _search
-
-
-def get_validator() -> DataValidator:
-    """Get or create validator instance."""
-    global _validator
-    if _validator is None:
-        _validator = DataValidator(settings)
-    return _validator
-
-
-# Request/Response models
-class SearchRequest(BaseModel):
-    """Search request body."""
-
-    query: str = Field(..., min_length=1, description="Search query text")
-    top_k: int = Field(default=10, ge=1, le=100, description="Number of results")
-    min_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Minimum similarity")
-    quality_filter: str | None = Field(default=None, description="Quality tier filter")
-
-
-class SearchResult(BaseModel):
-    """Single search result."""
-
-    id: str
-    file_id: str
-    text: str
-    score: float
-    quality_score: float | None
-    chunk_index: int | None
-
-
-class SearchResponse(BaseModel):
-    """Search response."""
-
-    query: str
-    results: list[SearchResult]
-    total: int
-
-
-class ValidationResponse(BaseModel):
-    """Validation response."""
-
-    total_checked: int
-    passed: int
-    failed: int
-    pass_rate: float
-    issues: list[dict[str, Any]]
-
-
-class StatsResponse(BaseModel):
-    """Statistics response."""
-
-    lancedb: dict[str, Any]
-    pipeline: dict[str, Any] | None = None
-
-
-# Endpoints
-@app.get("/health")
-async def health_check() -> dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "healthy"}
-
-
-@app.post("/search", response_model=SearchResponse)
-async def search(request: SearchRequest) -> SearchResponse:
-    """
-    Search for similar documents.
-
-    - **query**: Text to search for
-    - **top_k**: Maximum number of results (1-100)
-    - **min_score**: Minimum similarity score (0-1)
-    - **quality_filter**: Filter by quality tier (high/medium/low)
-    """
-    search_service = get_search()
-
-    results = search_service.search(
-        query=request.query,
-        top_k=request.top_k,
-        min_score=request.min_score,
-        filter_quality=request.quality_filter,
-    )
-
-    return SearchResponse(
-        query=request.query,
-        results=[SearchResult(**r) for r in results],
-        total=len(results),
-    )
-
-
-@app.get("/search")
-async def search_get(
-    q: str = Query(..., min_length=1, description="Search query"),
-    top_k: int = Query(default=10, ge=1, le=100),
-    min_score: float = Query(default=0.0, ge=0.0, le=1.0),
-) -> SearchResponse:
-    """Search using GET request."""
-    search_service = get_search()
-
-    results = search_service.search(
-        query=q,
-        top_k=top_k,
-        min_score=min_score,
-    )
-
-    return SearchResponse(
-        query=q,
-        results=[SearchResult(**r) for r in results],
-        total=len(results),
-    )
-
-
-@app.get("/document/{doc_id}")
-async def get_document(doc_id: str) -> dict[str, Any]:
-    """Get a specific document by ID."""
-    search_service = get_search()
-
-    doc = search_service.get_document(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    return doc
-
-
-@app.get("/file/{file_id}/chunks")
-async def get_file_chunks(file_id: str) -> list[dict[str, Any]]:
-    """Get all chunks for a specific file."""
-    search_service = get_search()
-
-    chunks = search_service.get_by_file(file_id)
-    return chunks
-
-
-@app.get("/validate/embeddings", response_model=ValidationResponse)
-async def validate_embeddings(
-    sample_size: int = Query(default=1000, ge=100, le=10000),
-) -> ValidationResponse:
-    """Validate embedding quality by sampling."""
-    validator = get_validator()
-
-    report = validator.validate_embeddings(sample_size)
-
-    return ValidationResponse(
-        total_checked=report.total_checked,
-        passed=report.passed,
-        failed=report.failed,
-        pass_rate=report.pass_rate,
-        issues=report.issues,
-    )
-
-
-@app.get("/validate/pipeline", response_model=ValidationResponse)
-async def validate_pipeline() -> ValidationResponse:
-    """Validate pipeline completeness."""
-    validator = get_validator()
-
-    report = validator.validate_pipeline_completeness()
-
-    return ValidationResponse(
-        total_checked=report.total_checked,
-        passed=report.passed,
-        failed=report.failed,
-        pass_rate=report.pass_rate,
-        issues=report.issues,
-    )
-
-
-@app.get("/stats", response_model=StatsResponse)
-async def get_stats() -> StatsResponse:
-    """Get database and pipeline statistics."""
-    search_service = get_search()
-    validator = get_validator()
-
-    lancedb_stats = search_service._lancedb.get_stats()
-
-    try:
-        pipeline_stats = validator.get_pipeline_stats()
-    except Exception:
-        pipeline_stats = None
-
-    return StatsResponse(
-        lancedb=lancedb_stats,
-        pipeline=pipeline_stats,
-    )
-
-
-@app.get("/report/quality")
-async def quality_report() -> dict[str, Any]:
-    """Generate comprehensive quality report."""
-    validator = get_validator()
-    return validator.generate_quality_report()
-
-
-@app.get("/files")
-async def list_files(
-    limit: int = Query(default=50, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-    quality_tier: str | None = Query(default=None),
-) -> dict[str, Any]:
-    """List all files in the vector store."""
-    search_service = get_search()
-
-    # Get file list with aggregated stats
-    df = search_service._lancedb._table.to_pandas()
-
-    if quality_tier:
-        df = df[df.get("quality_score", 0) >= 0.8 if quality_tier == "high" else True]
-
-    # Group by file_id
-    file_stats = (
-        df.groupby("file_id")
-        .agg({
-            "chunk_index": "count",
-            "quality_score": "mean",
-            "text": lambda x: " ".join(x.head(1)),  # First chunk preview
-        })
-        .reset_index()
-        .rename(columns={"chunk_index": "chunk_count", "text": "preview"})
-    )
-
-    # Truncate preview
-    file_stats["preview"] = file_stats["preview"].str[:200] + "..."
-
-    total = len(file_stats)
-    files = file_stats.iloc[offset : offset + limit].to_dict(orient="records")
-
-    return {
-        "files": files,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    }
-
-
-# =============================================================================
-# Web UI
-# =============================================================================
+router = APIRouter()
 
 WEB_UI_HTML = """
 <!DOCTYPE html>
@@ -282,7 +16,6 @@ WEB_UI_HTML = """
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <style>
         [x-cloak] { display: none !important; }
-        .highlight { background-color: #fef08a; }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-100 min-h-screen">
@@ -297,19 +30,19 @@ WEB_UI_HTML = """
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <div class="text-sm text-gray-400">Total Documents</div>
-                <div class="text-2xl font-bold text-purple-400" x-text="stats.total_documents || '-'"></div>
+                <div class="text-2xl font-bold text-purple-400" x-text="stats.lancedb?.total_documents?.toLocaleString() || '-'"></div>
             </div>
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <div class="text-sm text-gray-400">Unique Files</div>
-                <div class="text-2xl font-bold text-green-400" x-text="stats.unique_files || '-'"></div>
+                <div class="text-2xl font-bold text-green-400" x-text="stats.summary?.unique_files?.toLocaleString() || '-'"></div>
             </div>
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <div class="text-sm text-gray-400">Embedding Dimension</div>
-                <div class="text-2xl font-bold text-blue-400" x-text="stats.embedding_dim || '-'"></div>
+                <div class="text-2xl font-bold text-blue-400" x-text="stats.lancedb?.embedding_dim || '-'"></div>
             </div>
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <div class="text-sm text-gray-400">Avg Quality Score</div>
-                <div class="text-2xl font-bold text-yellow-400" x-text="stats.avg_quality ? stats.avg_quality.toFixed(2) : '-'"></div>
+                <div class="text-2xl font-bold text-yellow-400" x-text="stats.summary?.avg_quality_score?.toFixed(3) || '-'"></div>
             </div>
         </div>
 
@@ -321,7 +54,7 @@ WEB_UI_HTML = """
                     class="px-4 py-2 rounded-lg transition-colors">
                     Search
                 </button>
-                <button @click="activeTab = 'browse'"
+                <button @click="activeTab = 'browse'; loadFiles()"
                     :class="activeTab === 'browse' ? 'bg-purple-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'"
                     class="px-4 py-2 rounded-lg transition-colors">
                     Browse Files
@@ -384,7 +117,7 @@ WEB_UI_HTML = """
                 </template>
             </div>
 
-            <div x-show="searchResults.length === 0 && searchQuery && !searching" class="text-center py-12">
+            <div x-show="searchResults.length === 0 && searched && !searching" class="text-center py-12">
                 <p class="text-gray-400">No results found for your query.</p>
             </div>
         </div>
@@ -449,33 +182,42 @@ WEB_UI_HTML = """
                 <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
                     <h3 class="text-lg font-semibold text-purple-400 mb-4">LanceDB Statistics</h3>
                     <dl class="space-y-3">
-                        <template x-for="(value, key) in stats.lancedb || {}" :key="key">
-                            <div class="flex justify-between">
-                                <dt class="text-gray-400" x-text="key.replace(/_/g, ' ')"></dt>
-                                <dd class="text-white font-mono" x-text="typeof value === 'number' ? value.toLocaleString() : value"></dd>
-                            </div>
-                        </template>
+                        <div class="flex justify-between">
+                            <dt class="text-gray-400">Table Name</dt>
+                            <dd class="text-white font-mono" x-text="stats.lancedb?.table_name || '-'"></dd>
+                        </div>
+                        <div class="flex justify-between">
+                            <dt class="text-gray-400">Total Documents</dt>
+                            <dd class="text-white font-mono" x-text="stats.lancedb?.total_documents?.toLocaleString() || '-'"></dd>
+                        </div>
+                        <div class="flex justify-between">
+                            <dt class="text-gray-400">Embedding Dimension</dt>
+                            <dd class="text-white font-mono" x-text="stats.lancedb?.embedding_dim || '-'"></dd>
+                        </div>
+                        <div class="flex justify-between">
+                            <dt class="text-gray-400">URI</dt>
+                            <dd class="text-white font-mono text-sm truncate max-w-xs" x-text="stats.lancedb?.uri || '-'"></dd>
+                        </div>
                     </dl>
                 </div>
 
-                <!-- Pipeline Stats -->
+                <!-- Summary Stats -->
                 <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
-                    <h3 class="text-lg font-semibold text-green-400 mb-4">Pipeline Statistics</h3>
-                    <template x-if="stats.pipeline">
-                        <dl class="space-y-3">
-                            <template x-for="(counts, stage) in stats.pipeline?.stages || {}" :key="stage">
-                                <div class="border-b border-gray-700 pb-2">
-                                    <dt class="text-gray-300 font-medium capitalize" x-text="stage"></dt>
-                                    <dd class="flex gap-4 mt-1 text-sm">
-                                        <span class="text-green-400">Completed: <span x-text="counts.completed || 0"></span></span>
-                                        <span class="text-yellow-400">Processing: <span x-text="counts.processing || 0"></span></span>
-                                        <span class="text-red-400">Failed: <span x-text="counts.failed || 0"></span></span>
-                                    </dd>
-                                </div>
-                            </template>
-                        </dl>
-                    </template>
-                    <p x-show="!stats.pipeline" class="text-gray-400">Pipeline stats not available</p>
+                    <h3 class="text-lg font-semibold text-green-400 mb-4">Summary</h3>
+                    <dl class="space-y-3">
+                        <div class="flex justify-between">
+                            <dt class="text-gray-400">Unique Files</dt>
+                            <dd class="text-white font-mono" x-text="stats.summary?.unique_files?.toLocaleString() || '-'"></dd>
+                        </div>
+                        <div class="flex justify-between">
+                            <dt class="text-gray-400">Avg Quality Score</dt>
+                            <dd class="text-white font-mono" x-text="stats.summary?.avg_quality_score?.toFixed(4) || '-'"></dd>
+                        </div>
+                        <div class="flex justify-between">
+                            <dt class="text-gray-400">Avg Chunks/File</dt>
+                            <dd class="text-white font-mono" x-text="stats.summary?.avg_chunks_per_file?.toFixed(1) || '-'"></dd>
+                        </div>
+                    </dl>
                 </div>
             </div>
         </div>
@@ -501,7 +243,7 @@ WEB_UI_HTML = """
                             <div class="bg-gray-700 rounded p-3">
                                 <div class="flex justify-between mb-2 text-sm">
                                     <span class="text-gray-400">Chunk #<span x-text="chunk.chunk_index"></span></span>
-                                    <span class="text-yellow-400">Quality: <span x-text="chunk.quality_score?.toFixed(2)"></span></span>
+                                    <span class="text-yellow-400">Quality: <span x-text="chunk.quality_score?.toFixed(2) || 'N/A'"></span></span>
                                 </div>
                                 <p class="text-gray-200 text-sm" x-text="chunk.text"></p>
                             </div>
@@ -519,6 +261,7 @@ WEB_UI_HTML = """
                 searchQuery: '',
                 topK: '10',
                 searching: false,
+                searched: false,
                 searchResults: [],
                 files: [],
                 fileOffset: 0,
@@ -530,22 +273,12 @@ WEB_UI_HTML = """
 
                 async init() {
                     await this.loadStats();
-                    await this.loadFiles();
                 },
 
                 async loadStats() {
                     try {
-                        const response = await fetch('/stats');
-                        const data = await response.json();
-                        this.stats = {
-                            ...data,
-                            total_documents: data.lancedb?.total_documents,
-                            embedding_dim: data.lancedb?.embedding_dim,
-                        };
-                        // Calculate unique files from lancedb
-                        const filesResponse = await fetch('/files?limit=1');
-                        const filesData = await filesResponse.json();
-                        this.stats.unique_files = filesData.total;
+                        const response = await fetch('/api/stats');
+                        this.stats = await response.json();
                     } catch (e) {
                         console.error('Failed to load stats:', e);
                     }
@@ -553,7 +286,7 @@ WEB_UI_HTML = """
 
                 async loadFiles() {
                     try {
-                        const response = await fetch(`/files?limit=50&offset=${this.fileOffset}`);
+                        const response = await fetch(`/api/files?limit=50&offset=${this.fileOffset}`);
                         const data = await response.json();
                         this.files = data.files;
                         this.fileTotal = data.total;
@@ -566,8 +299,9 @@ WEB_UI_HTML = """
                     if (!this.searchQuery.trim()) return;
 
                     this.searching = true;
+                    this.searched = true;
                     try {
-                        const response = await fetch('/search', {
+                        const response = await fetch('/api/search', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
@@ -588,7 +322,7 @@ WEB_UI_HTML = """
                     this.selectedFile = fileId;
                     this.showFileModal = true;
                     try {
-                        const response = await fetch(`/file/${fileId}/chunks`);
+                        const response = await fetch(`/api/files/${fileId}`);
                         this.fileChunks = await response.json();
                     } catch (e) {
                         console.error('Failed to load file chunks:', e);
@@ -612,18 +346,13 @@ WEB_UI_HTML = """
 """
 
 
-@app.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse)
 async def web_ui() -> HTMLResponse:
     """Serve the web UI for browsing the vector database."""
     return HTMLResponse(content=WEB_UI_HTML)
 
 
-@app.get("/ui", response_class=HTMLResponse)
+@router.get("/ui", response_class=HTMLResponse)
 async def web_ui_alias() -> HTMLResponse:
     """Alias for web UI."""
     return HTMLResponse(content=WEB_UI_HTML)
-
-
-def create_app() -> FastAPI:
-    """Factory function for creating the app."""
-    return app

@@ -172,21 +172,98 @@ def report() -> None:
 
 
 @app.command()
+def browse(
+    limit: int = typer.Option(20, "--limit", "-l", help="Number of files to show"),
+    offset: int = typer.Option(0, "--offset", "-o", help="Offset for pagination"),
+) -> None:
+    """Browse files in the vector database."""
+    setup_logging()
+    settings = get_settings()
+
+    from aria.storage import LanceDBStore
+
+    lancedb = LanceDBStore(settings)
+    lancedb.create_table_if_not_exists()
+
+    # Get file list
+    df = lancedb._table.to_pandas()
+    file_stats = (
+        df.groupby("file_id")
+        .agg({
+            "chunk_index": "count",
+            "quality_score": "mean",
+        })
+        .reset_index()
+        .rename(columns={"chunk_index": "chunk_count"})
+    )
+
+    total = len(file_stats)
+    files = file_stats.iloc[offset : offset + limit]
+
+    table = Table(title=f"Files in Vector Database ({offset+1}-{offset+len(files)} of {total})")
+    table.add_column("File ID", style="magenta", width=30)
+    table.add_column("Chunks", style="cyan", justify="right", width=10)
+    table.add_column("Avg Quality", style="yellow", justify="right", width=12)
+
+    for _, row in files.iterrows():
+        table.add_row(
+            str(row["file_id"])[:30],
+            str(row["chunk_count"]),
+            f"{row['quality_score']:.3f}" if row["quality_score"] else "N/A",
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Use --offset {offset + limit} to see more[/dim]")
+
+
+@app.command()
+def show(
+    file_id: str = typer.Argument(..., help="File ID to show"),
+) -> None:
+    """Show all chunks for a specific file."""
+    setup_logging()
+    settings = get_settings()
+
+    from aria.storage import LanceDBStore
+
+    lancedb = LanceDBStore(settings)
+    lancedb.create_table_if_not_exists()
+
+    chunks = lancedb.get_by_file_id(file_id)
+
+    if not chunks:
+        console.print(f"[red]No chunks found for file: {file_id}[/red]")
+        return
+
+    console.print(f"\n[bold]File: {file_id}[/bold]")
+    console.print(f"[dim]Total chunks: {len(chunks)}[/dim]\n")
+
+    for chunk in sorted(chunks, key=lambda x: x.get("chunk_index", 0)):
+        console.print(f"[cyan]--- Chunk {chunk.get('chunk_index', '?')} ---[/cyan]")
+        console.print(f"[dim]Quality: {chunk.get('quality_score', 'N/A')}[/dim]")
+        console.print(chunk.get("text", "")[:500])
+        if len(chunk.get("text", "")) > 500:
+            console.print("[dim]...(truncated)[/dim]")
+        console.print()
+
+
+@app.command()
 def serve(
     host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host to bind"),
     port: int = typer.Option(8000, "--port", "-p", help="Port to bind"),
     reload: bool = typer.Option(False, "--reload", "-r", help="Enable auto-reload"),
 ) -> None:
-    """Start the API server."""
+    """Start the API server with web UI."""
     import uvicorn
 
     console.print(f"\n[bold]Starting Aria API Server[/bold]")
     console.print(f"  Host: {host}")
     console.print(f"  Port: {port}")
-    console.print(f"  Docs: http://{host}:{port}/docs\n")
+    console.print(f"  Web UI: http://{host}:{port}/")
+    console.print(f"  API Docs: http://{host}:{port}/docs\n")
 
     uvicorn.run(
-        "aria.query.api:app",
+        "aria.api.app:app",
         host=host,
         port=port,
         reload=reload,
