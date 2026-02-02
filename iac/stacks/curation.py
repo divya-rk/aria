@@ -1,8 +1,12 @@
 """Curation stack.
 
+SQS-driven pipeline:
+- Input: Curation Input Queue (from Hydration)
+- Output: Embedding Input Queue (to Embedding)
+
 Resources:
-- CPU node group for quality/dedup processing
-- SQS queue for curation jobs
+- Embedding input queue (output from Curation)
+- KEDA ScaledObject for SQS-based autoscaling
 """
 
 from aws_cdk import (
@@ -10,7 +14,6 @@ from aws_cdk import (
     Duration,
     Stack,
     aws_cloudwatch as cloudwatch,
-    aws_ec2 as ec2,
     aws_eks as eks,
     aws_sqs as sqs,
 )
@@ -18,7 +21,7 @@ from constructs import Construct
 
 
 class CurationStack(Stack):
-    """CPU infrastructure for quality filtering and deduplication."""
+    """Curation infrastructure - quality filtering and dedup."""
 
     def __init__(
         self,
@@ -27,6 +30,7 @@ class CurationStack(Stack):
         project: str,
         environment: str,
         eks_cluster: eks.Cluster,
+        curation_input_queue: sqs.IQueue,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -34,57 +38,72 @@ class CurationStack(Stack):
         self.project = project
         self.environment = environment
 
-        # CPU Node Group
-        self.cpu_nodegroup = eks_cluster.add_nodegroup_capacity(
-            "CurationNodeGroup",
-            nodegroup_name=f"{project}-cpu-curation-{environment}",
-            instance_types=[
-                ec2.InstanceType("c5.xlarge"),
-                ec2.InstanceType("c5.2xlarge"),
-            ],
-            min_size=0,
-            max_size=20,
-            desired_size=1,
-            capacity_type=eks.CapacityType.SPOT,
-            labels={
-                "aria.io/node-type": "cpu",
-                "aria.io/workload": "curation",
-            },
-        )
+        # =====================================================================
+        # EMBEDDING INPUT QUEUE (Curation → Embedding)
+        # =====================================================================
+        # Curation produces messages here after quality filtering
 
-        # DLQ
-        self.dlq = sqs.Queue(
+        self.embedding_input_dlq = sqs.Queue(
             self,
-            "CurationDlq",
-            queue_name=f"{project}-curation-{environment}-dlq",
+            "EmbeddingInputDlq",
+            queue_name=f"{project}-embedding-input-{environment}-dlq",
             retention_period=Duration.days(14),
         )
 
-        # Curation Queue
-        self.queue = sqs.Queue(
+        self.embedding_input_queue = sqs.Queue(
             self,
-            "CurationQueue",
-            queue_name=f"{project}-curation-{environment}",
+            "EmbeddingInputQueue",
+            queue_name=f"{project}-embedding-input-{environment}",
             visibility_timeout=Duration.minutes(5),
             retention_period=Duration.days(14),
             dead_letter_queue=sqs.DeadLetterQueue(
                 max_receive_count=3,
-                queue=self.dlq,
+                queue=self.embedding_input_dlq,
             ),
         )
 
         # CloudWatch Alarms
         cloudwatch.Alarm(
             self,
-            "DlqAlarm",
-            alarm_name=f"{project}-curation-dlq-{environment}",
-            metric=self.dlq.metric_approximate_number_of_messages_visible(),
-            threshold=50,
+            "EmbeddingInputDlqAlarm",
+            alarm_name=f"{project}-embedding-input-dlq-{environment}",
+            metric=self.embedding_input_dlq.metric_approximate_number_of_messages_visible(),
+            threshold=20,
             evaluation_periods=1,
-            alarm_description="Curation DLQ has messages - quality/dedup failures",
+            alarm_description="Embedding input DLQ has messages - curation output failures",
         )
 
+        # KEDA ScaledObject for Curation workers
+        scaled_object = {
+            "apiVersion": "keda.sh/v1alpha1",
+            "kind": "ScaledObject",
+            "metadata": {
+                "name": "curation-scaledobject",
+                "namespace": "aria",
+            },
+            "spec": {
+                "scaleTargetRef": {
+                    "name": "curation-worker",
+                },
+                "minReplicaCount": 0,
+                "maxReplicaCount": 30,
+                "pollingInterval": 15,
+                "cooldownPeriod": 120,
+                "triggers": [
+                    {
+                        "type": "aws-sqs-queue",
+                        "metadata": {
+                            "queueURL": curation_input_queue.queue_url,
+                            "queueLength": "10",
+                            "awsRegion": self.region,
+                        },
+                    }
+                ],
+            },
+        }
+
+        eks_cluster.add_manifest("CurationScaledObject", scaled_object)
+
         # Outputs
-        CfnOutput(self, "CpuNodeGroupName", value=self.cpu_nodegroup.nodegroup_name)
-        CfnOutput(self, "CurationQueueUrl", value=self.queue.queue_url)
-        CfnOutput(self, "CurationDlqUrl", value=self.dlq.queue_url)
+        CfnOutput(self, "EmbeddingInputQueueUrl", value=self.embedding_input_queue.queue_url)
+        CfnOutput(self, "EmbeddingInputQueueArn", value=self.embedding_input_queue.queue_arn)

@@ -1,23 +1,27 @@
 """Tokenization stack.
 
+SQS-driven pipeline:
+- Input: Tokenization Input Queue (from Embedding)
+- Output: S3 shards (final output)
+
 Resources:
-- CPU node group for tokenization
-- CloudWatch dashboard for training data
+- KEDA ScaledObject for SQS-based autoscaling
+- CloudWatch dashboard
 """
 
 from aws_cdk import (
     CfnOutput,
     Stack,
     aws_cloudwatch as cloudwatch,
-    aws_ec2 as ec2,
     aws_eks as eks,
     aws_s3 as s3,
+    aws_sqs as sqs,
 )
 from constructs import Construct
 
 
 class TokenizationStack(Stack):
-    """Infrastructure for tokenization and sharding."""
+    """Tokenization infrastructure - sharding for LLM training."""
 
     def __init__(
         self,
@@ -27,6 +31,7 @@ class TokenizationStack(Stack):
         environment: str,
         eks_cluster: eks.Cluster,
         output_bucket: s3.IBucket,
+        tokenization_input_queue: sqs.IQueue,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -34,37 +39,127 @@ class TokenizationStack(Stack):
         self.project = project
         self.environment = environment
 
-        # CPU Node Group (smaller, tokenization is lightweight)
-        self.cpu_nodegroup = eks_cluster.add_nodegroup_capacity(
-            "TokenizationNodeGroup",
-            nodegroup_name=f"{project}-cpu-tokenization-{environment}",
-            instance_types=[
-                ec2.InstanceType("m5.large"),
-                ec2.InstanceType("m5.xlarge"),
-            ],
-            min_size=0,
-            max_size=5,
-            desired_size=0,
-            capacity_type=eks.CapacityType.SPOT,
-            labels={
-                "aria.io/node-type": "cpu",
-                "aria.io/workload": "tokenization",
+        # KEDA ScaledObject for Tokenization workers
+        scaled_object = {
+            "apiVersion": "keda.sh/v1alpha1",
+            "kind": "ScaledObject",
+            "metadata": {
+                "name": "tokenization-scaledobject",
+                "namespace": "aria",
             },
-        )
+            "spec": {
+                "scaleTargetRef": {
+                    "name": "tokenization-worker",
+                },
+                "minReplicaCount": 0,
+                "maxReplicaCount": 10,
+                "pollingInterval": 30,
+                "cooldownPeriod": 300,
+                "triggers": [
+                    {
+                        "type": "aws-sqs-queue",
+                        "metadata": {
+                            "queueURL": tokenization_input_queue.queue_url,
+                            "queueLength": "20",
+                            "awsRegion": self.region,
+                        },
+                    }
+                ],
+            },
+        }
 
-        # Grant output bucket access
-        output_bucket.grant_read_write(self.cpu_nodegroup.role)
+        eks_cluster.add_manifest("TokenizationScaledObject", scaled_object)
 
         # CloudWatch Dashboard
         dashboard = cloudwatch.Dashboard(
             self,
-            "TokenizationDashboard",
-            dashboard_name=f"{project}-tokenization-{environment}",
+            "PipelineDashboard",
+            dashboard_name=f"{project}-pipeline-{environment}",
+        )
+
+        # Pipeline flow metrics
+        dashboard.add_widgets(
+            cloudwatch.TextWidget(
+                markdown="# Aria Pipeline Dashboard\n\nSQS-driven pipeline: Collection → Hydration → Curation → Embedding → Tokenization",
+                width=24,
+                height=2,
+            ),
         )
 
         dashboard.add_widgets(
             cloudwatch.GraphWidget(
-                title="S3 Bucket Size",
+                title="Pipeline Queue Depths",
+                width=24,
+                height=6,
+                left=[
+                    cloudwatch.Metric(
+                        namespace="AWS/SQS",
+                        metric_name="ApproximateNumberOfMessagesVisible",
+                        dimensions_map={"QueueName": f"{project}-hydration-input-{environment}"},
+                        label="Hydration Input",
+                    ),
+                    cloudwatch.Metric(
+                        namespace="AWS/SQS",
+                        metric_name="ApproximateNumberOfMessagesVisible",
+                        dimensions_map={"QueueName": f"{project}-curation-input-{environment}"},
+                        label="Curation Input",
+                    ),
+                    cloudwatch.Metric(
+                        namespace="AWS/SQS",
+                        metric_name="ApproximateNumberOfMessagesVisible",
+                        dimensions_map={"QueueName": f"{project}-embedding-input-{environment}"},
+                        label="Embedding Input",
+                    ),
+                    cloudwatch.Metric(
+                        namespace="AWS/SQS",
+                        metric_name="ApproximateNumberOfMessagesVisible",
+                        dimensions_map={"QueueName": f"{project}-tokenization-input-{environment}"},
+                        label="Tokenization Input",
+                    ),
+                ],
+            ),
+        )
+
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="DLQ Messages (Failures)",
+                width=12,
+                height=6,
+                left=[
+                    cloudwatch.Metric(
+                        namespace="AWS/SQS",
+                        metric_name="ApproximateNumberOfMessagesVisible",
+                        dimensions_map={"QueueName": f"{project}-hydration-input-{environment}-dlq"},
+                        label="Hydration DLQ",
+                        color="#d62728",
+                    ),
+                    cloudwatch.Metric(
+                        namespace="AWS/SQS",
+                        metric_name="ApproximateNumberOfMessagesVisible",
+                        dimensions_map={"QueueName": f"{project}-curation-input-{environment}-dlq"},
+                        label="Curation DLQ",
+                        color="#ff7f0e",
+                    ),
+                    cloudwatch.Metric(
+                        namespace="AWS/SQS",
+                        metric_name="ApproximateNumberOfMessagesVisible",
+                        dimensions_map={"QueueName": f"{project}-embedding-input-{environment}-dlq"},
+                        label="Embedding DLQ",
+                        color="#9467bd",
+                    ),
+                    cloudwatch.Metric(
+                        namespace="AWS/SQS",
+                        metric_name="ApproximateNumberOfMessagesVisible",
+                        dimensions_map={"QueueName": f"{project}-tokenization-input-{environment}-dlq"},
+                        label="Tokenization DLQ",
+                        color="#8c564b",
+                    ),
+                ],
+            ),
+            cloudwatch.GraphWidget(
+                title="S3 Output Bucket",
+                width=12,
+                height=6,
                 left=[
                     cloudwatch.Metric(
                         namespace="AWS/S3",
@@ -74,27 +169,13 @@ class TokenizationStack(Stack):
                             "StorageType": "StandardStorage",
                         },
                         statistic="Average",
-                    )
-                ],
-            ),
-            cloudwatch.GraphWidget(
-                title="S3 Object Count",
-                left=[
-                    cloudwatch.Metric(
-                        namespace="AWS/S3",
-                        metric_name="NumberOfObjects",
-                        dimensions_map={
-                            "BucketName": output_bucket.bucket_name,
-                            "StorageType": "AllStorageTypes",
-                        },
-                        statistic="Average",
-                    )
+                        label="Bucket Size",
+                    ),
                 ],
             ),
         )
 
         # Outputs
-        CfnOutput(self, "TokenizationNodeGroupName", value=self.cpu_nodegroup.nodegroup_name)
         CfnOutput(
             self,
             "TrainingShardsPath",
@@ -103,5 +184,5 @@ class TokenizationStack(Stack):
         CfnOutput(
             self,
             "DashboardUrl",
-            value=f"https://{self.region}.console.aws.amazon.com/cloudwatch/home?region={self.region}#dashboards:name={project}-tokenization-{environment}",
+            value=f"https://{self.region}.console.aws.amazon.com/cloudwatch/home?region={self.region}#dashboards:name={project}-pipeline-{environment}",
         )

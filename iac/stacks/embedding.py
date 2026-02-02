@@ -1,9 +1,12 @@
 """Embedding stack.
 
+SQS-driven pipeline:
+- Input: Embedding Input Queue (from Curation)
+- Output: Tokenization Input Queue (to Tokenization)
+
 Resources:
-- CPU node group for embedding generation
-- SQS queue for embedding jobs
-- IAM policy for LanceDB S3 access
+- Tokenization input queue (output from Embedding)
+- KEDA ScaledObject for SQS-based autoscaling
 """
 
 from aws_cdk import (
@@ -11,9 +14,7 @@ from aws_cdk import (
     Duration,
     Stack,
     aws_cloudwatch as cloudwatch,
-    aws_ec2 as ec2,
     aws_eks as eks,
-    aws_iam as iam,
     aws_s3 as s3,
     aws_sqs as sqs,
 )
@@ -21,7 +22,7 @@ from constructs import Construct
 
 
 class EmbeddingStack(Stack):
-    """Infrastructure for vector embedding generation."""
+    """Embedding infrastructure - vector generation."""
 
     def __init__(
         self,
@@ -31,6 +32,7 @@ class EmbeddingStack(Stack):
         environment: str,
         eks_cluster: eks.Cluster,
         lancedb_bucket: s3.IBucket,
+        embedding_input_queue: sqs.IQueue,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -38,60 +40,72 @@ class EmbeddingStack(Stack):
         self.project = project
         self.environment = environment
 
-        # CPU Node Group
-        self.cpu_nodegroup = eks_cluster.add_nodegroup_capacity(
-            "EmbeddingNodeGroup",
-            nodegroup_name=f"{project}-cpu-embedding-{environment}",
-            instance_types=[
-                ec2.InstanceType("c5.xlarge"),
-                ec2.InstanceType("c5.2xlarge"),
-            ],
-            min_size=0,
-            max_size=10,
-            desired_size=1,
-            capacity_type=eks.CapacityType.SPOT,
-            labels={
-                "aria.io/node-type": "cpu",
-                "aria.io/workload": "embedding",
-            },
-        )
+        # =====================================================================
+        # TOKENIZATION INPUT QUEUE (Embedding → Tokenization)
+        # =====================================================================
+        # Embedding produces messages here after vectorization
 
-        # Grant LanceDB bucket access
-        lancedb_bucket.grant_read_write(self.cpu_nodegroup.role)
-
-        # DLQ
-        self.dlq = sqs.Queue(
+        self.tokenization_input_dlq = sqs.Queue(
             self,
-            "EmbeddingDlq",
-            queue_name=f"{project}-embedding-{environment}-dlq",
+            "TokenizationInputDlq",
+            queue_name=f"{project}-tokenization-input-{environment}-dlq",
             retention_period=Duration.days(14),
         )
 
-        # Embedding Queue
-        self.queue = sqs.Queue(
+        self.tokenization_input_queue = sqs.Queue(
             self,
-            "EmbeddingQueue",
-            queue_name=f"{project}-embedding-{environment}",
+            "TokenizationInputQueue",
+            queue_name=f"{project}-tokenization-input-{environment}",
             visibility_timeout=Duration.minutes(5),
             retention_period=Duration.days(14),
             dead_letter_queue=sqs.DeadLetterQueue(
                 max_receive_count=3,
-                queue=self.dlq,
+                queue=self.tokenization_input_dlq,
             ),
         )
 
         # CloudWatch Alarms
         cloudwatch.Alarm(
             self,
-            "DlqAlarm",
-            alarm_name=f"{project}-embedding-dlq-{environment}",
-            metric=self.dlq.metric_approximate_number_of_messages_visible(),
+            "TokenizationInputDlqAlarm",
+            alarm_name=f"{project}-tokenization-input-dlq-{environment}",
+            metric=self.tokenization_input_dlq.metric_approximate_number_of_messages_visible(),
             threshold=20,
             evaluation_periods=1,
-            alarm_description="Embedding DLQ has messages",
+            alarm_description="Tokenization input DLQ has messages - embedding output failures",
         )
 
+        # KEDA ScaledObject for Embedding workers
+        scaled_object = {
+            "apiVersion": "keda.sh/v1alpha1",
+            "kind": "ScaledObject",
+            "metadata": {
+                "name": "embedding-scaledobject",
+                "namespace": "aria",
+            },
+            "spec": {
+                "scaleTargetRef": {
+                    "name": "embedding-worker",
+                },
+                "minReplicaCount": 0,
+                "maxReplicaCount": 20,
+                "pollingInterval": 15,
+                "cooldownPeriod": 120,
+                "triggers": [
+                    {
+                        "type": "aws-sqs-queue",
+                        "metadata": {
+                            "queueURL": embedding_input_queue.queue_url,
+                            "queueLength": "10",
+                            "awsRegion": self.region,
+                        },
+                    }
+                ],
+            },
+        }
+
+        eks_cluster.add_manifest("EmbeddingScaledObject", scaled_object)
+
         # Outputs
-        CfnOutput(self, "EmbeddingNodeGroupName", value=self.cpu_nodegroup.nodegroup_name)
-        CfnOutput(self, "EmbeddingQueueUrl", value=self.queue.queue_url)
-        CfnOutput(self, "EmbeddingDlqUrl", value=self.dlq.queue_url)
+        CfnOutput(self, "TokenizationInputQueueUrl", value=self.tokenization_input_queue.queue_url)
+        CfnOutput(self, "TokenizationInputQueueArn", value=self.tokenization_input_queue.queue_arn)

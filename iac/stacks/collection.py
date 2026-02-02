@@ -1,9 +1,11 @@
 """Collection stack.
 
+SQS-driven pipeline:
+- S3 events → Ingestion Queue → Hydration stage picks up
+
 Resources:
-- SQS queue for ingestion
+- SQS queue for ingestion (input to Hydration)
 - S3 event notifications
-- Lambda validator (optional)
 """
 
 from aws_cdk import (
@@ -11,7 +13,6 @@ from aws_cdk import (
     Duration,
     Stack,
     aws_cloudwatch as cloudwatch,
-    aws_lambda as lambda_,
     aws_s3 as s3,
     aws_s3_notifications as s3n,
     aws_sqs as sqs,
@@ -20,7 +21,7 @@ from constructs import Construct
 
 
 class CollectionStack(Stack):
-    """Collection infrastructure for S3 event processing."""
+    """Collection infrastructure - S3 events to SQS."""
 
     def __init__(
         self,
@@ -36,64 +37,60 @@ class CollectionStack(Stack):
         self.project = project
         self.environment = environment
 
-        # Dead Letter Queue
-        self.dlq = sqs.Queue(
+        # =====================================================================
+        # HYDRATION INPUT QUEUE (Collection → Hydration)
+        # =====================================================================
+        # This queue is consumed by the Hydration stage
+
+        self.hydration_input_dlq = sqs.Queue(
             self,
-            "IngestionDlq",
-            queue_name=f"{project}-ingestion-{environment}-dlq",
+            "HydrationInputDlq",
+            queue_name=f"{project}-hydration-input-{environment}-dlq",
             retention_period=Duration.days(14),
         )
 
-        # Main Ingestion Queue
-        self.queue = sqs.Queue(
+        self.hydration_input_queue = sqs.Queue(
             self,
-            "IngestionQueue",
-            queue_name=f"{project}-ingestion-{environment}",
-            visibility_timeout=Duration.minutes(5),
+            "HydrationInputQueue",
+            queue_name=f"{project}-hydration-input-{environment}",
+            visibility_timeout=Duration.minutes(10),  # GPU processing time
             retention_period=Duration.days(14),
             dead_letter_queue=sqs.DeadLetterQueue(
                 max_receive_count=3,
-                queue=self.dlq,
+                queue=self.hydration_input_dlq,
             ),
         )
 
-        # Allow S3 to send notifications to SQS
-        self.queue.grant_send_messages(
-            raw_bucket.grant_principal if hasattr(raw_bucket, 'grant_principal')
-            else None
-        )
-
-        # S3 Event Notifications
-        for suffix in [".mp3", ".wav", ".flac", ".m4a"]:
+        # S3 Event Notifications → Hydration Input Queue
+        for suffix in [".mp3", ".wav", ".flac", ".m4a", ".ogg", ".webm"]:
             raw_bucket.add_event_notification(
                 s3.EventType.OBJECT_CREATED,
-                s3n.SqsDestination(self.queue),
+                s3n.SqsDestination(self.hydration_input_queue),
                 s3.NotificationKeyFilter(suffix=suffix),
             )
 
-        # CloudWatch Alarm for DLQ
+        # CloudWatch Alarms
         cloudwatch.Alarm(
             self,
-            "DlqAlarm",
-            alarm_name=f"{project}-ingestion-dlq-{environment}",
-            metric=self.dlq.metric_approximate_number_of_messages_visible(),
+            "HydrationInputDlqAlarm",
+            alarm_name=f"{project}-hydration-input-dlq-{environment}",
+            metric=self.hydration_input_dlq.metric_approximate_number_of_messages_visible(),
             threshold=10,
             evaluation_periods=1,
-            alarm_description="Ingestion DLQ has messages - check for failures",
+            alarm_description="Hydration input DLQ has messages - S3 event processing failures",
         )
 
-        # Queue depth alarm
         cloudwatch.Alarm(
             self,
-            "QueueDepthAlarm",
-            alarm_name=f"{project}-ingestion-queue-depth-{environment}",
-            metric=self.queue.metric_approximate_number_of_messages_visible(),
+            "HydrationInputQueueDepthAlarm",
+            alarm_name=f"{project}-hydration-input-depth-{environment}",
+            metric=self.hydration_input_queue.metric_approximate_number_of_messages_visible(),
             threshold=10000,
             evaluation_periods=2,
-            alarm_description="Ingestion queue depth is high",
+            alarm_description="Hydration input queue depth is high - scale up GPU nodes",
         )
 
         # Outputs
-        CfnOutput(self, "IngestionQueueUrl", value=self.queue.queue_url)
-        CfnOutput(self, "IngestionQueueArn", value=self.queue.queue_arn)
-        CfnOutput(self, "IngestionDlqUrl", value=self.dlq.queue_url)
+        CfnOutput(self, "HydrationInputQueueUrl", value=self.hydration_input_queue.queue_url)
+        CfnOutput(self, "HydrationInputQueueArn", value=self.hydration_input_queue.queue_arn)
+        CfnOutput(self, "HydrationInputDlqUrl", value=self.hydration_input_dlq.queue_url)
