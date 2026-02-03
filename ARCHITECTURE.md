@@ -394,9 +394,12 @@ Example: 150 messages in curation queue
 | **CPU** | c6i/m6i instances (Spot preferred) |
 | **Queue** | SQS with DLQ (queue per stage) |
 | **Storage** | S3, DynamoDB, LanceDB |
+| **API** | FastAPI, Pydantic (strict validation) |
+| **Web UI** | Alpine.js, Tailwind CSS |
 | **IaC** | AWS CDK (Python) |
 | **ML Models** | Whisper large-v3, Sentence Transformers |
 | **Observability** | CloudWatch (dashboards, alarms) |
+| **Tooling** | uv (packages), ruff (linting), just (tasks) |
 
 ---
 
@@ -435,22 +438,200 @@ cdk diff
 
 ---
 
+## Project Structure
+
+```
+aria/
+├── src/aria/
+│   ├── api/                    # FastAPI REST API
+│   │   ├── app.py              # App factory with CORS
+│   │   └── routes/
+│   │       ├── search.py       # Semantic search endpoints
+│   │       ├── files.py        # File browsing endpoints
+│   │       ├── stats.py        # Statistics endpoints
+│   │       ├── validate.py     # Validation endpoints
+│   │       └── ui.py           # Web UI endpoint
+│   │
+│   ├── models/                 # Pydantic models (strict validation)
+│   │   ├── base.py             # StrictModel, ImmutableModel
+│   │   ├── hydration.py        # TranscriptSegment, HydrationResult
+│   │   ├── curation.py         # QualityMetrics, CurationResult
+│   │   ├── embedding.py        # ChunkRecord, EmbeddingRecord
+│   │   ├── tokenization.py     # ShardRecord, ShardManifest
+│   │   └── pipeline.py         # PipelineMessage, PipelineState
+│   │
+│   ├── worker/                 # SQS worker implementations
+│   │   ├── base.py             # BaseWorker abstract class
+│   │   └── ...
+│   │
+│   ├── hydration/              # Whisper transcription
+│   ├── curation/               # Quality filtering
+│   ├── embedding/              # Vector generation
+│   ├── tokenization/           # Shard creation
+│   ├── storage/                # DynamoDB, LanceDB, S3 clients
+│   └── query/                  # Search and validation
+│
+├── iac/                        # AWS CDK infrastructure
+│   ├── app.py
+│   └── stacks/
+│
+├── k8s/                        # Kubernetes manifests
+│   ├── base/
+│   └── overlays/{dev,prod}/
+│
+└── docker/                     # Dockerfiles per worker
+```
+
+---
+
+## Data Models (Pydantic)
+
+All data flowing through the pipeline uses strict Pydantic models to prevent data contamination:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           PYDANTIC DATA MODELS                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+  StrictModel (base)
+  ├── extra = "forbid"          # No unexpected fields allowed
+  ├── strict = True             # Strict type checking
+  ├── validate_assignment       # Validate on every change
+  └── str_strip_whitespace      # Clean string inputs
+
+  Pipeline Stage Models:
+  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+  │   Hydration     │    │    Curation     │    │    Embedding    │    │  Tokenization   │
+  │                 │    │                 │    │                 │    │                 │
+  │ TranscriptSeg   │───▶│ QualityMetrics  │───▶│ ChunkRecord     │───▶│ ShardRecord     │
+  │ HydrationResult │    │ CurationResult  │    │ EmbeddingRecord │    │ ShardManifest   │
+  │                 │    │ PIIDetection    │    │ EmbeddingResult │    │ TokenizationRes │
+  └─────────────────┘    └─────────────────┘    └─────────────────┘    └─────────────────┘
+           │                      │                      │                      │
+           └──────────────────────┴──────────────────────┴──────────────────────┘
+                                           │
+                                           ▼
+                              ┌─────────────────────────┐
+                              │    PipelineMessage      │
+                              │                         │
+                              │  • source_stage         │
+                              │  • target_stage         │
+                              │  • file_id              │
+                              │  • payload (validated)  │
+                              │  • trace_id             │
+                              └─────────────────────────┘
+
+  Key Validations:
+  • HydrationResult: Segments ordered by time, confidence scores in range
+  • CurationResult: Quality tier matches score, PII tracking
+  • EmbeddingRecord: No zero vectors, no NaN, consistent dimensions
+  • ShardManifest: Token counts validated, checksums for integrity
+  • PipelineMessage: Stage ordering enforced (hydration → curation → ...)
+```
+
+---
+
+## API & Web UI
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           API ARCHITECTURE                                           │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────────┐
+  │                              FastAPI Application                                 │
+  │                                                                                  │
+  │   GET /                    Web UI (Alpine.js + Tailwind)                        │
+  │   GET /health              Health check                                          │
+  │   GET /docs                OpenAPI documentation                                 │
+  │                                                                                  │
+  │   /api/search              ─────────────────────────────────────────────────────│
+  │   ├── POST /search         Semantic search with query vector                    │
+  │   └── GET  /search?q=      Search via query params                              │
+  │                                                                                  │
+  │   /api/files               ─────────────────────────────────────────────────────│
+  │   ├── GET  /files          List files with pagination                           │
+  │   ├── GET  /files/{id}     Get all chunks for a file                            │
+  │   └── DELETE /files/{id}   Delete file from vector store                        │
+  │                                                                                  │
+  │   /api/stats               ─────────────────────────────────────────────────────│
+  │   ├── GET  /stats          Combined LanceDB + pipeline stats                    │
+  │   ├── GET  /stats/quality  Quality score distribution                           │
+  │   └── GET  /stats/languages Language distribution                               │
+  │                                                                                  │
+  │   /api/validate            ─────────────────────────────────────────────────────│
+  │   ├── GET  /validate/embeddings   Validate vector quality                       │
+  │   ├── GET  /validate/pipeline     Validate pipeline completeness                │
+  │   └── GET  /validate/report       Full quality report                           │
+  └─────────────────────────────────────────────────────────────────────────────────┘
+
+  Web UI Features:
+  ┌─────────────────────────────────────────────────────────────────────────────────┐
+  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                                       │
+  │  │  Search  │  │  Browse  │  │  Stats   │   ◀── Tab Navigation                  │
+  │  └──────────┘  └──────────┘  └──────────┘                                       │
+  │                                                                                  │
+  │  Search Tab:                                                                     │
+  │  • Semantic search input with result count selector                             │
+  │  • Results show file_id, chunk_index, score, quality, text preview              │
+  │                                                                                  │
+  │  Browse Tab:                                                                     │
+  │  • Paginated file list with chunk count and avg quality                         │
+  │  • Click to view all chunks in modal                                            │
+  │                                                                                  │
+  │  Stats Tab:                                                                      │
+  │  • LanceDB statistics (documents, dimensions, URI)                              │
+  │  • Pipeline statistics (if available)                                           │
+  │  • Quality distribution summary                                                  │
+  └─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Query Interface
 
 ### CLI
 ```bash
+# Search
 aria search "machine learning" --top-k 10
+
+# Browse files
+aria browse --limit 20
+aria show <file_id>
+
+# Validation
 aria validate --check embeddings
+aria validate --check pipeline
+
+# Statistics
 aria stats
 aria report
+
+# Start API server with Web UI
+aria serve --port 8000
 ```
 
-### API
+### API Endpoints
 ```
-GET  /search?q=...&top_k=10
-GET  /document/{id}
-GET  /file/{file_id}/chunks
-GET  /validate/embeddings
-GET  /stats
-POST /search (JSON body)
+# Search
+POST /api/search              { "query": "...", "top_k": 10 }
+GET  /api/search?q=...&top_k=10
+
+# Files
+GET  /api/files?limit=50&offset=0
+GET  /api/files/{file_id}
+DELETE /api/files/{file_id}
+
+# Statistics
+GET  /api/stats
+GET  /api/stats/quality
+GET  /api/stats/languages
+
+# Validation
+GET  /api/validate/embeddings?sample_size=1000
+GET  /api/validate/pipeline
+GET  /api/validate/report
+
+# Web UI
+GET  /                        # Interactive web interface
 ```
