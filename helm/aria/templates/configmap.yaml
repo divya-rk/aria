@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aria.fullname" . }}-config
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+data:
+  AWS_REGION: {{ .Values.global.awsRegion | quote }}
+  RAW_BUCKET: {{ include "aria.rawBucket" . | quote }}
+  OUTPUT_BUCKET: {{ include "aria.outputBucket" . | quote }}
+  LANCEDB_BUCKET: {{ include "aria.lancedbBucket" . | quote }}
+  DYNAMODB_TABLE: {{ include "aria.dynamodbTable" . | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  BATCH_SIZE: {{ .Values.config.batchSize | quote }}
+  # Hydration config
+  WHISPER_MODEL: {{ .Values.hydration.config.whisperModel | quote }}
+  WHISPER_DEVICE: {{ .Values.hydration.config.whisperDevice | quote }}
+  WHISPER_COMPUTE_TYPE: {{ .Values.hydration.config.whisperComputeType | quote }}
+  # Curation config
+  QUALITY_THRESHOLD_HIGH: {{ .Values.curation.config.qualityThresholdHigh | quote }}
+  QUALITY_THRESHOLD_MEDIUM: {{ .Values.curation.config.qualityThresholdMedium | quote }}
+  QUALITY_THRESHOLD_LOW: {{ .Values.curation.config.qualityThresholdLow | quote }}
+  # Embedding config
+  EMBEDDING_MODEL: {{ .Values.embedding.config.embeddingModel | quote }}
+  EMBEDDING_DIMENSION: {{ .Values.embedding.config.embeddingDimension | quote }}
+  CHUNK_SIZE: {{ .Values.embedding.config.chunkSize | quote }}
+  CHUNK_OVERLAP: {{ .Values.embedding.config.chunkOverlap | quote }}
+  # Tokenization config
+  TOKENIZER_MODEL: {{ .Values.tokenization.config.tokenizerModel | quote }}
+  SHARD_SIZE_TOKENS: {{ .Values.tokenization.config.shardSizeTokens | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aria.fullname" . }}-queues
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+data:
+  HYDRATION_INPUT_QUEUE_URL: {{ .Values.queues.hydrationInput | quote }}
+  CURATION_INPUT_QUEUE_URL: {{ .Values.queues.curationInput | quote }}
+  EMBEDDING_INPUT_QUEUE_URL: {{ .Values.queues.embeddingInput | quote }}
+  TOKENIZATION_INPUT_QUEUE_URL: {{ .Values.queues.tokenizationInput | quote }}

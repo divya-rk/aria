@@ -1,0 +1,19 @@
+apiVersion: v2
+name: aria
+description: Aria - Audio data pipeline for LLM training
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - audio
+  - pipeline
+  - llm
+  - training
+  - whisper
+  - embeddings
+maintainers:
+  - name: Aria Team
+home: https://github.com/divya-rk/aria
+sources:
+  - https://github.com/divya-rk/aria
+dependencies: []

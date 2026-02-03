@@ -1,0 +1,73 @@
+{{- if .Values.tokenization.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aria.fullname" . }}-tokenization
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tokenization
+spec:
+  replicas: {{ .Values.tokenization.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aria.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: tokenization
+  template:
+    metadata:
+      labels:
+        {{- include "aria.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: tokenization
+        aria.io/node-type: cpu
+    spec:
+      serviceAccountName: {{ include "aria.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 120
+      {{- with .Values.tokenization.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tokenization.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: tokenization
+          image: "{{ include "aria.registry" . }}/aria-tokenization:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "aria.tokenization.worker"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "aria.fullname" . }}-config
+          env:
+            - name: INPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aria.fullname" . }}-queues
+                  key: TOKENIZATION_INPUT_QUEUE_URL
+            - name: OUTPUT_BUCKET
+              value: {{ include "aria.s3Bucket" (dict "Values" .Values "bucket" "tokenized") }}
+            - name: DYNAMODB_TABLE
+              value: {{ include "aria.dynamodbTable" . }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.tokenization.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import os; exit(0 if os.path.exists('/tmp/healthy') else 1)"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import os; exit(0 if os.path.exists('/tmp/ready') else 1)"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi
+{{- end }}

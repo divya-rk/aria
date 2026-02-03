@@ -1,0 +1,79 @@
+{{- if .Values.hydration.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aria.fullname" . }}-hydration
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hydration
+spec:
+  replicas: {{ .Values.hydration.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aria.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: hydration
+  template:
+    metadata:
+      labels:
+        {{- include "aria.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: hydration
+        aria.io/node-type: gpu
+    spec:
+      serviceAccountName: {{ include "aria.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 300
+      {{- with .Values.hydration.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hydration.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: hydration
+          image: "{{ include "aria.registry" . }}/aria-hydration:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "aria.hydration.worker"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "aria.fullname" . }}-config
+          env:
+            - name: INPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aria.fullname" . }}-queues
+                  key: HYDRATION_INPUT_QUEUE_URL
+            - name: OUTPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aria.fullname" . }}-queues
+                  key: CURATION_INPUT_QUEUE_URL
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.hydration.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import os; exit(0 if os.path.exists('/tmp/healthy') else 1)"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import os; exit(0 if os.path.exists('/tmp/ready') else 1)"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 5Gi
+{{- end }}

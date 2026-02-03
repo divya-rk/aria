@@ -1,0 +1,117 @@
+{{- if .Values.keda.enabled }}
+---
+{{- if .Values.hydration.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "aria.fullname" . }}-hydration-scaler
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hydration
+spec:
+  scaleTargetRef:
+    name: {{ include "aria.fullname" . }}-hydration
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.hydration.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.hydration.keda.maxReplicas }}
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: {{ include "aria.fullname" . }}-aws-credentials
+      metadata:
+        queueURL: {{ .Values.queues.hydrationInput }}
+        queueLength: {{ .Values.hydration.keda.queueLength | quote }}
+        awsRegion: {{ .Values.global.region }}
+        identityOwner: operator
+{{- end }}
+---
+{{- if .Values.curation.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "aria.fullname" . }}-curation-scaler
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+    app.kubernetes.io/component: curation
+spec:
+  scaleTargetRef:
+    name: {{ include "aria.fullname" . }}-curation
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.curation.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.curation.keda.maxReplicas }}
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: {{ include "aria.fullname" . }}-aws-credentials
+      metadata:
+        queueURL: {{ .Values.queues.curationInput }}
+        queueLength: {{ .Values.curation.keda.queueLength | quote }}
+        awsRegion: {{ .Values.global.region }}
+        identityOwner: operator
+{{- end }}
+---
+{{- if .Values.embedding.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "aria.fullname" . }}-embedding-scaler
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+    app.kubernetes.io/component: embedding
+spec:
+  scaleTargetRef:
+    name: {{ include "aria.fullname" . }}-embedding
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.embedding.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.embedding.keda.maxReplicas }}
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: {{ include "aria.fullname" . }}-aws-credentials
+      metadata:
+        queueURL: {{ .Values.queues.embeddingInput }}
+        queueLength: {{ .Values.embedding.keda.queueLength | quote }}
+        awsRegion: {{ .Values.global.region }}
+        identityOwner: operator
+{{- end }}
+---
+{{- if .Values.tokenization.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "aria.fullname" . }}-tokenization-scaler
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tokenization
+spec:
+  scaleTargetRef:
+    name: {{ include "aria.fullname" . }}-tokenization
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.tokenization.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.tokenization.keda.maxReplicas }}
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: {{ include "aria.fullname" . }}-aws-credentials
+      metadata:
+        queueURL: {{ .Values.queues.tokenizationInput }}
+        queueLength: {{ .Values.tokenization.keda.queueLength | quote }}
+        awsRegion: {{ .Values.global.region }}
+        identityOwner: operator
+{{- end }}
+---
+# TriggerAuthentication for AWS credentials (uses IRSA)
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "aria.fullname" . }}-aws-credentials
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+spec:
+  podIdentity:
+    provider: aws-eks
+{{- end }}

@@ -1,55 +1,175 @@
-version: '3.8'
+version: "3.8"
+
+# Local development environment with LocalStack for AWS services
+# Usage:
+#   docker-compose up -d                    # Start core services (LocalStack, Redis, API)
+#   docker-compose --profile workers up -d  # Start with all workers
 
 services:
-  # Local DynamoDB for development
-  dynamodb-local:
-    image: amazon/dynamodb-local:latest
-    container_name: aria-dynamodb
-    ports:
-      - "8000:8000"
-    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /data"
-    volumes:
-      - dynamodb-data:/data
-
-  # LocalStack for S3/SQS emulation
+  # LocalStack for AWS services (S3, SQS, DynamoDB)
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:3.0
     container_name: aria-localstack
     ports:
       - "4566:4566"
     environment:
-      - SERVICES=s3,sqs
+      - SERVICES=s3,sqs,dynamodb
       - DEBUG=1
-      - DATA_DIR=/var/lib/localstack/data
+      - AWS_DEFAULT_REGION=us-east-1
     volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh
       - localstack-data:/var/lib/localstack
       - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # Aria API
-  aria-api:
+  # Redis for caching (deduplication, rate limiting)
+  redis:
+    image: redis:7-alpine
+    container_name: aria-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Aria API server
+  api:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile.api
     container_name: aria-api
     ports:
-      - "8080:8080"
+      - "8000:8000"
     environment:
-      - ENVIRONMENT=dev
-      - AWS_REGION=us-east-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
-      - DYNAMODB_ENDPOINT_URL=http://dynamodb-local:8000
-      - S3_RAW_BUCKET=aria-raw
-      - S3_OUTPUT_BUCKET=aria-output
+      - AWS_DEFAULT_REGION=us-east-1
+      - ENVIRONMENT=local
       - LANCEDB_URI=/data/lancedb
+      - REDIS_URL=redis://redis:6379
+      - RAW_BUCKET=aria-raw-local
+      - OUTPUT_BUCKET=aria-output-local
+      - DYNAMODB_TABLE=aria-pipeline-state-local
     volumes:
+      - ./src:/app/src:ro
       - lancedb-data:/data/lancedb
     depends_on:
-      - dynamodb-local
-      - localstack
-    command: ["aria", "serve", "--host", "0.0.0.0", "--port", "8080"]
+      localstack:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["uvicorn", "aria.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # Hydration worker (CPU mode for local dev)
+  hydration-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.curation
+    container_name: aria-hydration-worker
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - INPUT_QUEUE_URL=http://localstack:4566/000000000000/aria-hydration-input-local
+      - OUTPUT_QUEUE_URL=http://localstack:4566/000000000000/aria-curation-input-local
+      - RAW_BUCKET=aria-raw-local
+      - OUTPUT_BUCKET=aria-output-local
+      - DYNAMODB_TABLE=aria-pipeline-state-local
+      - WHISPER_MODEL=tiny
+      - WHISPER_DEVICE=cpu
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      localstack:
+        condition: service_healthy
+    profiles:
+      - workers
+
+  # Curation worker
+  curation-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.curation
+    container_name: aria-curation-worker
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - INPUT_QUEUE_URL=http://localstack:4566/000000000000/aria-curation-input-local
+      - OUTPUT_QUEUE_URL=http://localstack:4566/000000000000/aria-embedding-input-local
+      - OUTPUT_BUCKET=aria-output-local
+      - DYNAMODB_TABLE=aria-pipeline-state-local
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      localstack:
+        condition: service_healthy
+    profiles:
+      - workers
+
+  # Embedding worker
+  embedding-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.embedding
+    container_name: aria-embedding-worker
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - INPUT_QUEUE_URL=http://localstack:4566/000000000000/aria-embedding-input-local
+      - OUTPUT_QUEUE_URL=http://localstack:4566/000000000000/aria-tokenization-input-local
+      - OUTPUT_BUCKET=aria-output-local
+      - LANCEDB_URI=/data/lancedb
+      - DYNAMODB_TABLE=aria-pipeline-state-local
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./src:/app/src:ro
+      - lancedb-data:/data/lancedb
+    depends_on:
+      localstack:
+        condition: service_healthy
+    profiles:
+      - workers
+
+  # Tokenization worker
+  tokenization-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.tokenization
+    container_name: aria-tokenization-worker
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - INPUT_QUEUE_URL=http://localstack:4566/000000000000/aria-tokenization-input-local
+      - OUTPUT_BUCKET=aria-output-local
+      - DYNAMODB_TABLE=aria-pipeline-state-local
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      localstack:
+        condition: service_healthy
+    profiles:
+      - workers
 
 volumes:
-  dynamodb-data:
   localstack-data:
+  redis-data:
   lancedb-data:

@@ -1,0 +1,74 @@
+{{- if .Values.curation.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aria.fullname" . }}-curation
+  labels:
+    {{- include "aria.labels" . | nindent 4 }}
+    app.kubernetes.io/component: curation
+spec:
+  replicas: {{ .Values.curation.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aria.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: curation
+  template:
+    metadata:
+      labels:
+        {{- include "aria.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: curation
+        aria.io/node-type: cpu
+    spec:
+      serviceAccountName: {{ include "aria.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 120
+      {{- with .Values.curation.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.curation.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: curation
+          image: "{{ include "aria.registry" . }}/aria-curation:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "aria.curation.worker"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "aria.fullname" . }}-config
+          env:
+            - name: INPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aria.fullname" . }}-queues
+                  key: CURATION_INPUT_QUEUE_URL
+            - name: OUTPUT_QUEUE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "aria.fullname" . }}-queues
+                  key: EMBEDDING_INPUT_QUEUE_URL
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.curation.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import os; exit(0 if os.path.exists('/tmp/healthy') else 1)"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import os; exit(0 if os.path.exists('/tmp/ready') else 1)"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi
+{{- end }}

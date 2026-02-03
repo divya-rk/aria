@@ -1,0 +1,182 @@
+# Default values for Aria Helm chart
+
+# Global settings
+global:
+  environment: dev
+  project: aria
+  region: us-east-1
+  awsAccountId: ""  # Required: Set via --set or values file
+
+# Image settings
+image:
+  registry: ""  # Will be constructed from awsAccountId
+  pullPolicy: Always
+  tag: latest
+
+# Service account
+serviceAccount:
+  create: true
+  name: aria-worker
+  annotations: {}
+  # eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/aria-worker-dev
+
+# Common configuration
+config:
+  logLevel: INFO
+  batchSize: 10
+
+# S3 buckets
+s3:
+  rawBucket: ""      # Will be constructed: {project}-raw-{environment}
+  outputBucket: ""   # Will be constructed: {project}-output-{environment}
+  lancedbBucket: ""  # Will be constructed: {project}-lancedb-{environment}
+
+# DynamoDB
+dynamodb:
+  tableName: ""  # Will be constructed: {project}-pipeline-state-{environment}
+
+# SQS Queue URLs (set per environment)
+queues:
+  hydrationInput: ""
+  curationInput: ""
+  embeddingInput: ""
+  tokenizationInput: ""
+
+# Hydration worker (GPU)
+hydration:
+  enabled: true
+  replicaCount: 0  # KEDA manages
+  resources:
+    requests:
+      memory: "8Gi"
+      cpu: "2"
+      nvidia.com/gpu: "1"
+    limits:
+      memory: "14Gi"
+      cpu: "4"
+      nvidia.com/gpu: "1"
+  nodeSelector:
+    aria.io/node-type: gpu
+    aria.io/workload: hydration
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  config:
+    whisperModel: large-v3
+    whisperDevice: cuda
+    whisperComputeType: float16
+  keda:
+    enabled: true
+    minReplicas: 0
+    maxReplicas: 20
+    queueLength: "5"
+    cooldownPeriod: 300
+
+# Curation worker (CPU)
+curation:
+  enabled: true
+  replicaCount: 0
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1"
+    limits:
+      memory: "4Gi"
+      cpu: "2"
+  nodeSelector:
+    aria.io/node-type: cpu
+  tolerations: []
+  config:
+    qualityThresholdHigh: "0.8"
+    qualityThresholdMedium: "0.6"
+    qualityThresholdLow: "0.4"
+  keda:
+    enabled: true
+    minReplicas: 0
+    maxReplicas: 30
+    queueLength: "10"
+    cooldownPeriod: 120
+
+# Embedding worker (CPU)
+embedding:
+  enabled: true
+  replicaCount: 0
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "2"
+    limits:
+      memory: "8Gi"
+      cpu: "4"
+  nodeSelector:
+    aria.io/node-type: cpu
+  tolerations: []
+  config:
+    embeddingModel: all-MiniLM-L6-v2
+    embeddingDimension: "384"
+    chunkSize: "512"
+    chunkOverlap: "50"
+  keda:
+    enabled: true
+    minReplicas: 0
+    maxReplicas: 20
+    queueLength: "10"
+    cooldownPeriod: 120
+
+# Tokenization worker (CPU)
+tokenization:
+  enabled: true
+  replicaCount: 0
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "2"
+    limits:
+      memory: "8Gi"
+      cpu: "4"
+  nodeSelector:
+    aria.io/node-type: cpu
+  tolerations: []
+  config:
+    tokenizerModel: cl100k_base
+    shardSizeTokens: "100000000"
+  keda:
+    enabled: true
+    minReplicas: 0
+    maxReplicas: 10
+    queueLength: "20"
+    cooldownPeriod: 300
+
+# API server (optional, for browsing)
+api:
+  enabled: false
+  replicaCount: 1
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  service:
+    type: ClusterIP
+    port: 8000
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    tls: []
+
+# KEDA global settings
+keda:
+  enabled: true
+  pollingInterval: 30
+  cooldownPeriod: 300
+
+# Pod disruption budgets
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 0  # Allow scale to zero

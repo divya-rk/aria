@@ -1,0 +1,140 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: aria-pipeline-rules
+  namespace: aria
+  labels:
+    app: aria
+    prometheus: main
+spec:
+  groups:
+    - name: aria-sqs-alerts
+      interval: 30s
+      rules:
+        # DLQ has messages - indicates failures
+        - alert: AriaDLQMessagesHigh
+          expr: |
+            aws_sqs_approximate_number_of_messages_visible{
+              queue_name=~"aria-.*-dlq"
+            } > 10
+          for: 5m
+          labels:
+            severity: warning
+            team: data-platform
+          annotations:
+            summary: "Aria DLQ {{ $labels.queue_name }} has {{ $value }} messages"
+            description: "Dead letter queue has accumulated messages indicating processing failures"
+            runbook_url: "https://wiki/aria/runbooks/dlq-messages"
+
+        - alert: AriaDLQMessagesCritical
+          expr: |
+            aws_sqs_approximate_number_of_messages_visible{
+              queue_name=~"aria-.*-dlq"
+            } > 100
+          for: 5m
+          labels:
+            severity: critical
+            team: data-platform
+          annotations:
+            summary: "Aria DLQ {{ $labels.queue_name }} has {{ $value }} messages"
+            description: "Dead letter queue has critical number of messages"
+
+        # Queue depth growing - pipeline may be stuck
+        - alert: AriaQueueDepthGrowing
+          expr: |
+            increase(aws_sqs_approximate_number_of_messages_visible{
+              queue_name=~"aria-.*-input-.*",
+              queue_name!~".*-dlq"
+            }[1h]) > 1000
+          for: 30m
+          labels:
+            severity: warning
+            team: data-platform
+          annotations:
+            summary: "Aria queue {{ $labels.queue_name }} depth growing"
+            description: "Queue depth increased by {{ $value }} in the last hour"
+
+    - name: aria-worker-alerts
+      interval: 30s
+      rules:
+        # No workers running when queue has messages
+        - alert: AriaNoWorkersRunning
+          expr: |
+            aws_sqs_approximate_number_of_messages_visible{
+              queue_name=~"aria-.*-input-.*",
+              queue_name!~".*-dlq"
+            } > 0
+            and on() (
+              kube_deployment_status_replicas_available{
+                deployment=~".*-worker"
+              } == 0
+            )
+          for: 10m
+          labels:
+            severity: warning
+            team: data-platform
+          annotations:
+            summary: "No Aria workers running but queue has messages"
+            description: "KEDA may not be scaling workers correctly"
+
+        # Worker pod restarts
+        - alert: AriaWorkerRestarts
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              container=~".*-worker",
+              namespace="aria"
+            }[1h]) > 3
+          for: 5m
+          labels:
+            severity: warning
+            team: data-platform
+          annotations:
+            summary: "Aria worker {{ $labels.container }} restarting"
+            description: "Worker has restarted {{ $value }} times in the last hour"
+
+        # Worker memory pressure
+        - alert: AriaWorkerMemoryHigh
+          expr: |
+            container_memory_usage_bytes{
+              container=~".*-worker",
+              namespace="aria"
+            } / container_spec_memory_limit_bytes > 0.9
+          for: 10m
+          labels:
+            severity: warning
+            team: data-platform
+          annotations:
+            summary: "Aria worker {{ $labels.container }} memory usage high"
+            description: "Memory usage is {{ $value | humanizePercentage }}"
+
+    - name: aria-pipeline-metrics
+      interval: 60s
+      rules:
+        # Recording rules for dashboard
+        - record: aria:queue_depth:sum
+          expr: |
+            sum by (queue_name) (
+              aws_sqs_approximate_number_of_messages_visible{
+                queue_name=~"aria-.*"
+              }
+            )
+
+        - record: aria:processing_rate:5m
+          expr: |
+            sum by (stage) (
+              rate(aria_messages_processed_total[5m])
+            )
+
+        - record: aria:error_rate:5m
+          expr: |
+            sum by (stage) (
+              rate(aria_messages_failed_total[5m])
+            )
+
+        - record: aria:processing_duration:p99
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, stage) (
+                rate(aria_processing_duration_seconds_bucket[5m])
+              )
+            )
